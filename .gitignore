@@ -1,0 +1,33 @@
+# Datasets
+Dataset_ORALCE/
+Dataset_WiSig/
+
+# Checkpoints
+weight/
+
+# Logs
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Sensitive config
+opencode.json
+
+# Docs
+*.pdf
+*.md
+!AGENTS.md
