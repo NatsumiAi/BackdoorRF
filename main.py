@@ -5,6 +5,7 @@ import numpy as np
 import random
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import transforms
+from torch.amp import autocast, GradScaler
 import torch.nn.functional as F
 from util.get_dataset import get_dataset
 from util.CNNmodel import *
@@ -60,6 +61,7 @@ def parse_args():
     # trigger 什么时候加：pre/post augmentation
     parser.add_argument("--trigger_stage", type=str, default="post",
                         choices=["pre", "post"])
+    parser.add_argument("--amp", action="store_true")
     return parser.parse_args()
 
 def aug(iq_data, preprocess, main_aug_depth, aux_aug_depth,
@@ -153,7 +155,7 @@ class AugDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.dataset)
 
-def train(model, loss, train_dataloader, optimizer, epoch, conf):
+def train(model, loss, train_dataloader, optimizer, scaler, epoch, conf):
     model.train()
     correct = 0
     all_loss = 0
@@ -172,17 +174,22 @@ def train(model, loss, train_dataloader, optimizer, epoch, conf):
             target = target.cuda()
             target_all = torch.cat(target_all, 0).cuda()
             domain_target= torch.cat(domain_target, 0).cuda()
+        # AMP加速
+        optimizer.zero_grad(set_to_none=True)
 
-        optimizer.zero_grad()
-        embedding, output = model(data_all)
-        prob = F.log_softmax(output, dim=1)
-        porb_list = torch.split(prob, data[0].size(0))        
-        cls_loss = loss[0](porb_list[num_data - 1], target)       
-        con_loss = loss[1](embedding.unsqueeze(1), target_all, adv=False)
-        adv_con_loss = loss[1](embedding.unsqueeze(1), domain_target, adv=True)
-        result_loss = cls_loss + conf.lambda_con[0]*con_loss + conf.lambda_con[1]*adv_con_loss
-        result_loss.backward()
-        optimizer.step()
+        with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
+            embedding, output = model(data_all)
+            prob = F.log_softmax(output, dim=1)
+            porb_list = torch.split(prob, data[0].size(0))
+            cls_loss = loss[0](porb_list[num_data - 1], target)
+            con_loss = loss[1](embedding.unsqueeze(1), target_all, adv=False)
+            adv_con_loss = loss[1](embedding.unsqueeze(1), domain_target, adv=True)
+            result_loss = cls_loss + conf.lambda_con[0] * con_loss + conf.lambda_con[1] * adv_con_loss
+
+        scaler.scale(result_loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        # -------------
         all_loss += result_loss.item()*data[0].size(0)
         pred = porb_list[num_data -  1].argmax(dim=1, keepdim=True)
         correct += pred.eq(target.view_as(pred)).sum().item()
@@ -242,16 +249,16 @@ def test(model, test_dataloader, desc="Test"):
     return acc
 
 
-def train_and_evaluate(model, loss, train_loader, val_loader, optimizer, epochs, save_path, conf):
+def train_and_evaluate(model, loss, train_loader, val_loader, optimizer, scaler, epochs, save_path, conf):
     """Train and evaluate the model, saving the best model."""
     best_loss = float('inf')
     for epoch in range(1, epochs + 1):
-        train(model, loss, train_loader, optimizer, epoch, conf)
+        train(model, loss, train_loader, optimizer, scaler, epoch, conf)
         val_loss = evaluate(model, loss, val_loader, epoch)
         if val_loss < best_loss:
             print(f"Saving model at epoch {epoch} with loss {val_loss:.4f}")
             best_loss = val_loss
-            torch.save(model, save_path)
+            torch.save(model.state_dict(), save_path)
 
 def main():
     conf = parse_args()
@@ -307,6 +314,7 @@ def main():
     model = MACNN(in_channels=2, channels=get_param_value(conf.model_size), num_classes=num_classes)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=conf.lr, weight_decay=conf.wd)
+    scaler = GradScaler("cuda", enabled=conf.amp and torch.cuda.is_available())
     cls_loss = nn.NLLLoss()
     con_loss = SupConLoss()
 
@@ -320,11 +328,18 @@ def main():
 
     if conf.mode in ["train", "train_test"]:
         print("Starting training...")
-        train_and_evaluate(model, loss, train_loader, val_loader, optimizer, conf.epochs, save_path, conf)
+        train_and_evaluate(model, loss, train_loader, val_loader, optimizer, scaler, conf.epochs, save_path, conf)
 
     if conf.mode in ["test", "train_test"]:
         # 读取模型
-        model = torch.load(save_path)
+        model = MACNN(
+            in_channels=2,
+            channels=get_param_value(conf.model_size),
+            num_classes=num_classes
+        )
+        state_dict = torch.load(save_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+
         if torch.cuda.is_available():
             model = model.cuda()
 

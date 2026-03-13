@@ -12,26 +12,36 @@ def rotation(x):
     return x_aug
 
 def permutation(x, max_segments=5, seg_mode="equal"):
-    x  = x.transpose(1,0)
-    x = x[np.newaxis,:,:]
-    x_aug = np.zeros_like(x)
+    x = x.transpose(1, 0)
+    x = x[np.newaxis, :, :]
     orig_steps = np.arange(x.shape[1])
-    
+
     num_segs = np.random.randint(1, max_segments, size=(x.shape[0]))
-    
     ret = np.zeros_like(x)
+
     for i, pat in enumerate(x):
         if num_segs[i] > 1:
             if seg_mode == "random":
-                split_points = np.random.choice(x.shape[1]-2, num_segs[i]-1, replace=False)
+                # 避免分割点出现在两端，防止空分段
+                split_points = np.random.choice(
+                    np.arange(1, x.shape[1] - 1),
+                    num_segs[i] - 1,
+                    replace=False
+                )
                 split_points.sort()
                 splits = np.split(orig_steps, split_points)
             else:
                 splits = np.array_split(orig_steps, num_segs[i])
-            warp = np.concatenate(np.random.permutation(splits)).ravel()
+
+            # 不要直接 np.random.permutation(splits)
+            # 因为 splits 是不等长数组列表，在新版本 numpy 里可能报错
+            perm_idx = np.random.permutation(len(splits))
+            warp = np.concatenate([splits[idx] for idx in perm_idx]).ravel()
+
             ret[i] = pat[warp]
         else:
             ret[i] = pat
+
     return np.squeeze(ret.transpose((0, 2, 1)))
 
 def magnitude_warp(x, sigma=0.2, knot=4):
