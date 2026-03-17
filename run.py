@@ -24,7 +24,8 @@ COMMON_ARGS = {
     "lambda_con": [1.0, 100.0],
     "wd": 0,
     "cuda": "0",
-    "amp": True
+    "amp": True,
+    "use_tb": True
 }
 
 # 默认后门参数
