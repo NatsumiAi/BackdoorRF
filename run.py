@@ -51,53 +51,53 @@ BACKDOOR_ARGS = {
 
 # 要跑的实验列表
 EXPERIMENTS = [
-    {
-        "exp_name": "baseline_clean",
-        "backdoor": False
-    },
-    {
-        "exp_name": "single_patch_post",
-        "backdoor": True,
-        "trigger_stage": "post",
-        "backdoor_overrides": {
-            "trigger_type": "sine",
-            "trigger_len": 96,
-            "trigger_pos": "tail",
-            "trigger_segments": 1,
-            "trigger_anchor_positions": "tail",
-            "trigger_jitter": 0,
-            "trigger_adaptive_amp": False,
-            "poison_channel_aug": False,
-        }
-    },
-    {
-        "exp_name": "sparse_post",
-        "backdoor": True,
-        "trigger_stage": "post",
-        "backdoor_overrides": {
-            "trigger_type": "sparse_sine",
-            "trigger_len": 96,
-            "trigger_segments": 3,
-            "trigger_anchor_positions": "head,middle,tail",
-            "trigger_jitter": 16,
-            "trigger_adaptive_amp": True,
-            "poison_channel_aug": False,
-        }
-    },
-    {
-        "exp_name": "sparse_eot",
-        "backdoor": True,
-        "trigger_stage": "eot",
-        "backdoor_overrides": {
-            "trigger_type": "sparse_sine",
-            "trigger_len": 96,
-            "trigger_segments": 3,
-            "trigger_anchor_positions": "head,middle,tail",
-            "trigger_jitter": 16,
-            "trigger_adaptive_amp": True,
-            "poison_channel_aug": False,
-        }
-    },
+    # {
+    #     "exp_name": "baseline_clean",
+    #     "backdoor": False
+    # },
+    # {
+    #     "exp_name": "single_patch_post",
+    #     "backdoor": True,
+    #     "trigger_stage": "post",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sine",
+    #         "trigger_len": 96,
+    #         "trigger_pos": "tail",
+    #         "trigger_segments": 1,
+    #         "trigger_anchor_positions": "tail",
+    #         "trigger_jitter": 0,
+    #         "trigger_adaptive_amp": False,
+    #         "poison_channel_aug": False,
+    #     }
+    # },
+    # {
+    #     "exp_name": "sparse_post",
+    #     "backdoor": True,
+    #     "trigger_stage": "post",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sparse_sine",
+    #         "trigger_len": 96,
+    #         "trigger_segments": 3,
+    #         "trigger_anchor_positions": "head,middle,tail",
+    #         "trigger_jitter": 16,
+    #         "trigger_adaptive_amp": True,
+    #         "poison_channel_aug": False,
+    #     }
+    # },
+    # {
+    #     "exp_name": "sparse_eot",
+    #     "backdoor": True,
+    #     "trigger_stage": "eot",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sparse_sine",
+    #         "trigger_len": 96,
+    #         "trigger_segments": 3,
+    #         "trigger_anchor_positions": "head,middle,tail",
+    #         "trigger_jitter": 16,
+    #         "trigger_adaptive_amp": True,
+    #         "poison_channel_aug": False,
+    #     }
+    # },
     {
         "exp_name": "sparse_eot_channel",
         "backdoor": True,
