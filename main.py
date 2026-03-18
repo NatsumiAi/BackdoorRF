@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from util.get_dataset import get_dataset
 from util.CNNmodel import *
 from util.augmentation import augmentations
+from util.channel_aug import apply_channel_perturbation
 from torchsummary import summary
 from util.con_losses import SupConLoss
 from util.backdoor import add_trigger, make_poisoned_eval_set
@@ -51,21 +52,61 @@ def parse_args():
     parser.add_argument("--poison_rate", type=float, default=0.1)
     # 后门攻击参数
     parser.add_argument("--trigger_type", type=str, default="sine",
-                        choices=["sine", "const", "impulse", "square"])
+                        choices=[
+                            "sine", "const", "impulse", "square",
+                            "sparse_sine", "sparse_const", "sparse_impulse", "sparse_square"
+                        ])
     parser.add_argument("--trigger_amp", type=float, default=0.05)
     parser.add_argument("--trigger_len", type=int, default=64)
     parser.add_argument("--trigger_pos", type=str, default="tail",
                         choices=["head", "middle", "tail", "random"])
     parser.add_argument("--trigger_freq", type=int, default=8)
+    parser.add_argument("--trigger_segments", type=int, default=3)
+    parser.add_argument("--trigger_anchor_positions", type=str, default="head,middle,tail")
+    parser.add_argument("--trigger_jitter", type=int, default=8)
+    parser.add_argument("--trigger_iq_mode", type=str, default="quadrature",
+                        choices=["quadrature", "mirror", "same"])
+    parser.add_argument("--trigger_adaptive_amp", action="store_true")
+    parser.add_argument("--poison_channel_aug", action="store_true")
+    parser.add_argument("--channel_phase_max_deg", type=float, default=15.0)
+    parser.add_argument("--channel_scale_min", type=float, default=0.9)
+    parser.add_argument("--channel_scale_max", type=float, default=1.1)
+    parser.add_argument("--channel_shift_max", type=int, default=4)
+    parser.add_argument("--channel_snr_db", type=float, default=25.0)
 
-    # trigger 什么时候加：pre/post augmentation
+    # trigger 什么时候加：pre/post augmentation or EOT sampling
     parser.add_argument("--trigger_stage", type=str, default="post",
-                        choices=["pre", "post"])
+                        choices=["pre", "post", "eot"])
     parser.add_argument("--amp", action="store_true")
     return parser.parse_args()
 
+
+def _sample_augmented_view(base, preprocess, aug_depth, aug_list,
+                           poison=False, trigger_cfg=None, channel_cfg=None,
+                           trigger_stage="post"):
+    iq_data_aug = np.array(base, dtype=np.float32, copy=True)
+
+    if poison and trigger_cfg is not None and trigger_stage == "eot":
+        iq_data_aug = add_trigger(iq_data_aug, **trigger_cfg)
+        if channel_cfg is not None:
+            iq_data_aug = apply_channel_perturbation(iq_data_aug, **channel_cfg)
+
+    if aug_depth != 0:
+        sampled_ops = np.random.choice(aug_list, aug_depth)
+        for op in sampled_ops:
+            iq_data_aug = op(iq_data_aug)
+
+    if poison and trigger_cfg is not None and trigger_stage == "post":
+        iq_data_aug = add_trigger(iq_data_aug, **trigger_cfg)
+        if channel_cfg is not None:
+            iq_data_aug = apply_channel_perturbation(iq_data_aug, **channel_cfg)
+
+    iq_data_aug = np.squeeze(preprocess(iq_data_aug.astype(np.float32)))
+    return iq_data_aug
+
+
 def aug(iq_data, preprocess, main_aug_depth, aux_aug_depth,
-        poison=False, trigger_cfg=None, trigger_stage="post"):
+        poison=False, trigger_cfg=None, channel_cfg=None, trigger_stage="post"):
     aug_list = augmentations
     iq_data_aug_list = []
 
@@ -74,34 +115,36 @@ def aug(iq_data, preprocess, main_aug_depth, aux_aug_depth,
     # 先加 trigger，再增强
     if poison and trigger_cfg is not None and trigger_stage == "pre":
         base = add_trigger(base, **trigger_cfg)
+        if channel_cfg is not None:
+            base = apply_channel_perturbation(base, **channel_cfg)
 
     # aux views
     for i in range(len(aux_aug_depth)):
-        iq_data_aug = base.copy()
-        if aux_aug_depth[i] != 0:
-            # 随机数据增强
-            sampled_ops = np.random.choice(aug_list, aux_aug_depth[i])
-            for op in sampled_ops:
-                iq_data_aug = op(iq_data_aug)
-
-        # 先增强，再加 trigger
-        if poison and trigger_cfg is not None and trigger_stage == "post":
-            iq_data_aug = add_trigger(iq_data_aug, **trigger_cfg)
-
-        iq_data_aug = np.squeeze(preprocess(iq_data_aug.astype(np.float32)))
+        view_base = iq_data if trigger_stage == "eot" else base
+        iq_data_aug = _sample_augmented_view(
+            view_base,
+            preprocess,
+            aux_aug_depth[i],
+            aug_list,
+            poison=poison,
+            trigger_cfg=trigger_cfg,
+            channel_cfg=channel_cfg,
+            trigger_stage=trigger_stage,
+        )
         iq_data_aug_list.append(iq_data_aug)
 
     # main view
-    iq_data_aug = base.copy()
-    if main_aug_depth[0] != 0:
-        sampled_ops = np.random.choice(aug_list, main_aug_depth[0])
-        for op in sampled_ops:
-            iq_data_aug = op(iq_data_aug)
-
-    if poison and trigger_cfg is not None and trigger_stage == "post":
-        iq_data_aug = add_trigger(iq_data_aug, **trigger_cfg)
-
-    iq_data_aug = np.squeeze(preprocess(iq_data_aug.astype(np.float32)))
+    view_base = iq_data if trigger_stage == "eot" else base
+    iq_data_aug = _sample_augmented_view(
+        view_base,
+        preprocess,
+        main_aug_depth[0],
+        aug_list,
+        poison=poison,
+        trigger_cfg=trigger_cfg,
+        channel_cfg=channel_cfg,
+        trigger_stage=trigger_stage,
+    )
     iq_data_aug_list.append(iq_data_aug)
 
     return iq_data_aug_list
@@ -109,7 +152,7 @@ def aug(iq_data, preprocess, main_aug_depth, aux_aug_depth,
 class AugDataset(torch.utils.data.Dataset):
     def __init__(self, x_train, y_train, preprocess, main_aug_depth, aux_aug_depth,
                  backdoor=False, target_label=0, poison_rate=0.0,
-                 trigger_cfg=None, trigger_stage="post"):
+                 trigger_cfg=None, channel_cfg=None, trigger_stage="post"):
         self.dataset = []
         for i in range(np.shape(x_train)[0]):
             self.dataset.append((np.squeeze(x_train[i, :, :]), int(y_train[i])))
@@ -122,6 +165,7 @@ class AugDataset(torch.utils.data.Dataset):
         self.target_label = target_label
         self.poison_rate = poison_rate
         self.trigger_cfg = trigger_cfg
+        self.channel_cfg = channel_cfg
         self.trigger_stage = trigger_stage
 
         self.poison_mask = np.zeros(len(self.dataset), dtype=bool)
@@ -148,6 +192,7 @@ class AugDataset(torch.utils.data.Dataset):
             self.main_aug_depth, self.aux_aug_depth,
             poison=poison,
             trigger_cfg=self.trigger_cfg,
+            channel_cfg=self.channel_cfg,
             trigger_stage=self.trigger_stage
         )
         return x_aug, y
@@ -281,6 +326,16 @@ def main():
         f"tl={conf.trigger_len}_"
         f"tp={conf.trigger_pos}_"
         f"tf={conf.trigger_freq}_"
+        f"tseg={conf.trigger_segments}_"
+        f"tanch={conf.trigger_anchor_positions.replace(',', '-')}_"
+        f"tj={conf.trigger_jitter}_"
+        f"tiq={conf.trigger_iq_mode}_"
+        f"tad={int(conf.trigger_adaptive_amp)}_"
+        f"pca={int(conf.poison_channel_aug)}_"
+        f"cph={conf.channel_phase_max_deg}_"
+        f"cs={conf.channel_scale_min}-{conf.channel_scale_max}_"
+        f"csh={conf.channel_shift_max}_"
+        f"csnr={conf.channel_snr_db}_"
         f"ts={conf.trigger_stage}.pth"
     )
 
@@ -289,7 +344,20 @@ def main():
         "amp": conf.trigger_amp,
         "length": conf.trigger_len,
         "pos": conf.trigger_pos,
-        "freq": conf.trigger_freq
+        "freq": conf.trigger_freq,
+        "num_segments": conf.trigger_segments,
+        "anchors": conf.trigger_anchor_positions,
+        "jitter": conf.trigger_jitter,
+        "adaptive_amp": conf.trigger_adaptive_amp,
+        "iq_mode": conf.trigger_iq_mode,
+    }
+    channel_cfg = {
+        "enable": conf.poison_channel_aug,
+        "phase_max_deg": conf.channel_phase_max_deg,
+        "scale_min": conf.channel_scale_min,
+        "scale_max": conf.channel_scale_max,
+        "shift_max": conf.channel_shift_max,
+        "snr_db": conf.channel_snr_db,
     }
     
     dataset = get_dataset(conf.dataset_name)
@@ -302,6 +370,7 @@ def main():
             target_label=conf.target_label,
             poison_rate=conf.poison_rate,
             trigger_cfg=trigger_cfg,
+            channel_cfg=channel_cfg,
             trigger_stage=conf.trigger_stage
         ),
         batch_size=conf.batch_size,

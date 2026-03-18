@@ -1,0 +1,2 @@
+time,exp_name,dataset_name,model_size,epochs,main_aug_depth,aux_aug_depth,backdoor,target_label,poison_rate,trigger_type,trigger_amp,trigger_len,trigger_pos,trigger_freq,trigger_stage,clean_source_acc,source_asr,clean_target_acc_1,target_asr_1,clean_target_acc_2,target_asr_2,clean_target_acc_3,target_asr_3
+20260317_202002,baseline_clean,WiSig,S,100,4,1,0,,,,,,,,,0.835,,0.9488,,0.7838,,0.9377,
