@@ -11,20 +11,87 @@ MAIN_FILE = "main.py"             # 你的主训练脚本
 LOG_DIR = "log"
 RESULT_CSV = "experiment_results.csv"
 
+
+def get_result_fields():
+    return [
+        "time", "exp_name",
+        "checkpoint_path",
+        "dataset_name", "model_size", "epochs",
+        "main_aug_depth", "aux_aug_depth",
+        "num_workers", "pin_memory", "persistent_workers", "prefetch_factor", "benchmark",
+        "progress",
+        "use_mixstyle", "mixstyle_p", "mixstyle_alpha", "mixstyle_layers", "mixstyle_mode",
+        "semantic_mix", "semantic_mix_p", "semantic_mix_alpha", "lambda_sem",
+        "backdoor", "target_label", "poison_rate",
+        "trigger_type", "trigger_amp", "trigger_len", "trigger_pos", "trigger_freq",
+        "trigger_segments", "trigger_anchor_positions", "trigger_jitter",
+        "trigger_iq_mode", "trigger_adaptive_amp",
+        "poison_channel_aug", "channel_phase_max_deg", "channel_scale_min",
+        "channel_scale_max", "channel_shift_max", "channel_snr_db", "trigger_stage",
+        "clean_source_acc", "source_asr",
+        "clean_target_acc_1", "target_asr_1",
+        "clean_target_acc_2", "target_asr_2",
+        "clean_target_acc_3", "target_asr_3",
+    ]
+
+
+def resolve_result_csv_path(csv_file):
+    expected_fields = get_result_fields()
+    if not os.path.exists(csv_file):
+        return csv_file
+
+    with open(csv_file, "r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, [])
+
+    if header == expected_fields:
+        return csv_file
+
+    base, ext = os.path.splitext(csv_file)
+    version = 2
+    while True:
+        candidate = f"{base}_v{version}{ext}"
+        if not os.path.exists(candidate):
+            print(f"[INFO] Existing CSV header is outdated: {csv_file}")
+            print(f"[INFO] Writing new results to: {candidate}")
+            return candidate
+        with open(candidate, "r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, [])
+        if header == expected_fields:
+            print(f"[INFO] Using compatible results CSV: {candidate}")
+            return candidate
+        version += 1
+
 COMMON_ARGS = {
-    "dataset_name": "WiSig",     # ORACLE / WiSig
+    "dataset_name": "ORACLE",     # ORACLE / WiSig
     "mode": "train_test",
-    "model_size": "S",
-    "epochs": 100,
+    "model_size": "M",
+    "epochs": 300,
     "batch_size": 32,
     "test_batch_size": 16,
+    "num_workers": 6,
+    "pin_memory": True,
+    "persistent_workers": True,
+    "prefetch_factor": 2,
+    "benchmark": True,
+    "progress": True,
     "lr": 0.001,
     "main_aug_depth": [4],
     "aux_aug_depth": [1],
     "lambda_con": [1.0, 100.0],
     "wd": 0,
     "cuda": "0",
-    "amp": True
+    "amp": True,
+    "use_mixstyle": False,
+    "mixstyle_p": 0.5,
+    "mixstyle_alpha": 0.1,
+    "mixstyle_layers": "1,2",
+    "mixstyle_mode": "random",
+    "semantic_mix": True,
+    "semantic_mix_p": 0.5,
+    "semantic_mix_alpha": 0.4,
+    "lambda_sem": 0.5,
 }
 
 # 默认后门参数
@@ -32,11 +99,11 @@ BACKDOOR_ARGS = {
     "target_label": 0,
     "poison_rate": 0.1,
     "trigger_type": "sparse_sine",   # sine / const / impulse / square / sparse_*
-    "trigger_amp": 0.05,
-    "trigger_len": 96,
+    "trigger_amp": 0.08,
+    "trigger_len": 128,
     "trigger_pos": "tail",    # 稀疏 trigger 的兜底位置
     "trigger_freq": 8,
-    "trigger_segments": 3,
+    "trigger_segments": 2,
     "trigger_anchor_positions": "head,middle,tail",
     "trigger_jitter": 16,
     "trigger_iq_mode": "quadrature",
@@ -70,20 +137,20 @@ EXPERIMENTS = [
     #         "poison_channel_aug": False,
     #     }
     # },
-    # {
-    #     "exp_name": "sparse_post",
-    #     "backdoor": True,
-    #     "trigger_stage": "post",
-    #     "backdoor_overrides": {
-    #         "trigger_type": "sparse_sine",
-    #         "trigger_len": 96,
-    #         "trigger_segments": 3,
-    #         "trigger_anchor_positions": "head,middle,tail",
-    #         "trigger_jitter": 16,
-    #         "trigger_adaptive_amp": True,
-    #         "poison_channel_aug": False,
-    #     }
-    # },
+    {
+        "exp_name": "sparse_post",
+        "backdoor": True,
+        "trigger_stage": "post",
+        "backdoor_overrides": {
+            "trigger_type": "sparse_sine",
+            "trigger_len": 128,
+            "trigger_segments": 2,
+            "trigger_anchor_positions": "head,middle,tail",
+            "trigger_jitter": 16,
+            "trigger_adaptive_amp": True,
+            "poison_channel_aug": False,
+        }
+    },
     # {
     #     "exp_name": "sparse_eot",
     #     "backdoor": True,
@@ -98,25 +165,25 @@ EXPERIMENTS = [
     #         "poison_channel_aug": False,
     #     }
     # },
-    {
-        "exp_name": "sparse_eot_channel",
-        "backdoor": True,
-        "trigger_stage": "eot",
-        "backdoor_overrides": {
-            "trigger_type": "sparse_sine",
-            "trigger_len": 96,
-            "trigger_segments": 3,
-            "trigger_anchor_positions": "head,middle,tail",
-            "trigger_jitter": 16,
-            "trigger_adaptive_amp": True,
-            "poison_channel_aug": True,
-            "channel_phase_max_deg": 15.0,
-            "channel_scale_min": 0.9,
-            "channel_scale_max": 1.1,
-            "channel_shift_max": 4,
-            "channel_snr_db": 25.0,
-        }
-    },
+    # {
+    #     "exp_name": "sparse_eot_channel",
+    #     "backdoor": True,
+    #     "trigger_stage": "eot",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sparse_sine",
+    #         "trigger_len": 96,
+    #         "trigger_segments": 3,
+    #         "trigger_anchor_positions": "head,middle,tail",
+    #         "trigger_jitter": 16,
+    #         "trigger_adaptive_amp": True,
+    #         "poison_channel_aug": True,
+    #         "channel_phase_max_deg": 15.0,
+    #         "channel_scale_min": 0.9,
+    #         "channel_scale_max": 1.1,
+    #         "channel_shift_max": 4,
+    #         "channel_snr_db": 25.0,
+    #     }
+    # },
 ]
 # ===============================
 
@@ -174,6 +241,7 @@ def parse_metrics(log_text):
     metrics = {}
 
     patterns = {
+        "checkpoint_path": r"Checkpoint path:\s*(.+)",
         "clean_source_acc": r"Clean Source Acc:\s*([0-9]*\.?[0-9]+)",
         "source_asr": r"Source ASR:\s*([0-9]*\.?[0-9]+)",
     }
@@ -181,7 +249,7 @@ def parse_metrics(log_text):
     for k, p in patterns.items():
         m = re.search(p, log_text)
         if m:
-            metrics[k] = float(m.group(1))
+            metrics[k] = m.group(1) if k == "checkpoint_path" else float(m.group(1))
 
     # 匹配多个 target 域结果
     clean_target_matches = re.findall(r"Clean Target Acc #(\d+):\s*([0-9]*\.?[0-9]+)", log_text)
@@ -199,22 +267,7 @@ def parse_metrics(log_text):
 def save_csv_row(csv_file, row_dict):
     file_exists = os.path.exists(csv_file)
 
-    # 收集所有可能字段
-    base_fields = [
-        "time", "exp_name",
-        "dataset_name", "model_size", "epochs",
-        "main_aug_depth", "aux_aug_depth",
-        "backdoor", "target_label", "poison_rate",
-        "trigger_type", "trigger_amp", "trigger_len", "trigger_pos", "trigger_freq",
-        "trigger_segments", "trigger_anchor_positions", "trigger_jitter",
-        "trigger_iq_mode", "trigger_adaptive_amp",
-        "poison_channel_aug", "channel_phase_max_deg", "channel_scale_min",
-        "channel_scale_max", "channel_shift_max", "channel_snr_db", "trigger_stage",
-        "clean_source_acc", "source_asr",
-        "clean_target_acc_1", "target_asr_1",
-        "clean_target_acc_2", "target_asr_2",
-        "clean_target_acc_3", "target_asr_3",
-    ]
+    base_fields = get_result_fields()
 
     with open(csv_file, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=base_fields)
@@ -275,6 +328,21 @@ def run_one_experiment(exp_cfg):
         "epochs": COMMON_ARGS["epochs"],
         "main_aug_depth": ",".join(map(str, COMMON_ARGS["main_aug_depth"])),
         "aux_aug_depth": ",".join(map(str, COMMON_ARGS["aux_aug_depth"])),
+        "num_workers": COMMON_ARGS.get("num_workers", ""),
+        "pin_memory": int(COMMON_ARGS.get("pin_memory", False)),
+        "persistent_workers": int(COMMON_ARGS.get("persistent_workers", False)),
+        "prefetch_factor": COMMON_ARGS.get("prefetch_factor", ""),
+        "benchmark": int(COMMON_ARGS.get("benchmark", False)),
+        "progress": int(COMMON_ARGS.get("progress", False)),
+        "use_mixstyle": int(COMMON_ARGS.get("use_mixstyle", False)),
+        "mixstyle_p": COMMON_ARGS.get("mixstyle_p", ""),
+        "mixstyle_alpha": COMMON_ARGS.get("mixstyle_alpha", ""),
+        "mixstyle_layers": COMMON_ARGS.get("mixstyle_layers", ""),
+        "mixstyle_mode": COMMON_ARGS.get("mixstyle_mode", ""),
+        "semantic_mix": int(COMMON_ARGS.get("semantic_mix", False)),
+        "semantic_mix_p": COMMON_ARGS.get("semantic_mix_p", ""),
+        "semantic_mix_alpha": COMMON_ARGS.get("semantic_mix_alpha", ""),
+        "lambda_sem": COMMON_ARGS.get("lambda_sem", ""),
         "backdoor": int(exp_cfg.get("backdoor", False)),
         "target_label": exp_backdoor_args["target_label"] if exp_cfg.get("backdoor", False) else "",
         "poison_rate": exp_backdoor_args["poison_rate"] if exp_cfg.get("backdoor", False) else "",
@@ -311,6 +379,8 @@ def run_one_experiment(exp_cfg):
 
 def main():
     ensure_dir(LOG_DIR)
+    global RESULT_CSV
+    RESULT_CSV = resolve_result_csv_path(RESULT_CSV)
 
     print("即将运行以下实验：")
     for exp in EXPERIMENTS:

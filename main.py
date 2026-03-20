@@ -1,8 +1,12 @@
 import os
 import argparse
+import hashlib
+import inspect
+import time
 import torch
 import numpy as np
 import random
+import math
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import transforms
 from torch.amp import autocast, GradScaler
@@ -15,12 +19,18 @@ from torchsummary import summary
 from util.con_losses import SupConLoss
 from util.backdoor import add_trigger, make_poisoned_eval_set
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 def setup_seed(seed):
      torch.manual_seed(seed)
      torch.cuda.manual_seed_all(seed)
      np.random.seed(seed)
      random.seed(seed)
      torch.backends.cudnn.deterministic = True
+     torch.backends.cudnn.benchmark = False
 
 setup_seed(2023)
 
@@ -32,6 +42,54 @@ def get_param_value(model_size: str) -> int:
     else:
         raise ValueError(f"Invalid model_size: {model_size}. Use 'S', 'M', or 'L'.")
 
+
+def build_save_path(conf):
+    os.makedirs("weight", exist_ok=True)
+
+    tags = [
+        f"Dataset={conf.dataset_name}",
+        f"Model={conf.model_size}",
+        f"mad={','.join(map(str, conf.main_aug_depth))}",
+        f"aad={','.join(map(str, conf.aux_aug_depth))}",
+        f"nw={conf.num_workers}",
+        f"pm={int(conf.pin_memory)}",
+        f"pw={int(conf.persistent_workers)}",
+        f"pf={conf.prefetch_factor}",
+        f"bm={int(conf.benchmark)}",
+        f"lam={','.join(map(str, conf.lambda_con))}",
+        f"bd={int(conf.backdoor)}",
+        f"target={conf.target_label}",
+        f"pr={conf.poison_rate}",
+        f"tt={conf.trigger_type}",
+        f"ta={conf.trigger_amp}",
+        f"tl={conf.trigger_len}",
+        f"tp={conf.trigger_pos}",
+        f"tf={conf.trigger_freq}",
+        f"tseg={conf.trigger_segments}",
+        f"tj={conf.trigger_jitter}",
+        f"tiq={conf.trigger_iq_mode}",
+        f"tad={int(conf.trigger_adaptive_amp)}",
+        f"pca={int(conf.poison_channel_aug)}",
+        f"cph={conf.channel_phase_max_deg}",
+        f"cs={conf.channel_scale_min}-{conf.channel_scale_max}",
+        f"csh={conf.channel_shift_max}",
+        f"csnr={conf.channel_snr_db}",
+        f"ms={int(conf.use_mixstyle)}",
+        f"msp={conf.mixstyle_p}",
+        f"msa={conf.mixstyle_alpha}",
+        f"msl={conf.mixstyle_layers.replace(',', '-')}",
+        f"msm={conf.mixstyle_mode}",
+        f"sm={int(conf.semantic_mix)}",
+        f"smp={conf.semantic_mix_p}",
+        f"sma={conf.semantic_mix_alpha}",
+        f"ls={conf.lambda_sem}",
+        f"ts={conf.trigger_stage}",
+    ]
+    long_name = "_".join(tags)
+    digest = hashlib.sha1(long_name.encode("utf-8")).hexdigest()[:10]
+    short_name = f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth"
+    return os.path.join("weight", short_name)
+
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Single-source Domain Generalization")
@@ -40,6 +98,12 @@ def parse_args():
     parser.add_argument("--model_size", type=str, default="S")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--test_batch_size", type=int, default=16)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--pin_memory", action="store_true")
+    parser.add_argument("--persistent_workers", action="store_true")
+    parser.add_argument("--prefetch_factor", type=int, default=2)
+    parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--progress", action="store_true")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--main_aug_depth", type=int, nargs='+', default=[2])
@@ -73,12 +137,60 @@ def parse_args():
     parser.add_argument("--channel_scale_max", type=float, default=1.1)
     parser.add_argument("--channel_shift_max", type=int, default=4)
     parser.add_argument("--channel_snr_db", type=float, default=25.0)
+    parser.add_argument("--use_mixstyle", action="store_true")
+    parser.add_argument("--mixstyle_p", type=float, default=0.5)
+    parser.add_argument("--mixstyle_alpha", type=float, default=0.1)
+    parser.add_argument("--mixstyle_layers", type=str, default="1,2")
+    parser.add_argument("--mixstyle_mode", type=str, default="random",
+                        choices=["random", "crossdomain"])
+    parser.add_argument("--semantic_mix", action="store_true")
+    parser.add_argument("--semantic_mix_p", type=float, default=0.5)
+    parser.add_argument("--semantic_mix_alpha", type=float, default=0.4)
+    parser.add_argument("--lambda_sem", type=float, default=0.5)
 
     # trigger 什么时候加：pre/post augmentation or EOT sampling
     parser.add_argument("--trigger_stage", type=str, default="post",
                         choices=["pre", "post", "eot"])
     parser.add_argument("--amp", action="store_true")
     return parser.parse_args()
+
+
+def parse_layer_spec(layer_spec):
+    layers = []
+    for item in str(layer_spec).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        layers.append(int(item))
+    return layers
+
+
+def soft_cross_entropy(logits, soft_targets):
+    log_prob = F.log_softmax(logits, dim=1)
+    return -(soft_targets * log_prob).sum(dim=1).mean()
+
+
+def semantic_mixup(embeddings, labels, num_classes, alpha=0.4, prob=0.5):
+    if alpha <= 0.0 or prob <= 0.0 or embeddings.size(0) < 2:
+        return None
+
+    if random.random() > prob:
+        return None
+
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    lam = beta_dist.sample((embeddings.size(0), 1)).to(embeddings.device)
+    perm = torch.randperm(embeddings.size(0), device=embeddings.device)
+
+    mixed_embeddings = F.normalize(lam * embeddings + (1.0 - lam) * embeddings[perm], dim=1)
+    one_hot = F.one_hot(labels, num_classes=num_classes).float()
+    mixed_targets = lam * one_hot + (1.0 - lam) * one_hot[perm]
+    return mixed_embeddings, mixed_targets
+
+
+def maybe_tqdm(iterable, enabled=False, **kwargs):
+    if enabled and tqdm is not None:
+        return tqdm(iterable, **kwargs)
+    return iterable
 
 
 def _sample_augmented_view(base, preprocess, aug_depth, aug_list,
@@ -204,7 +316,21 @@ def train(model, loss, train_dataloader, optimizer, scaler, epoch, conf):
     model.train()
     correct = 0
     all_loss = 0
-    for data_nn in train_dataloader:
+    num_samples = 0
+    data_time_total = 0.0
+    iter_time_total = 0.0
+    last_time = time.perf_counter()
+    progress_bar = maybe_tqdm(
+        train_dataloader,
+        enabled=conf.progress,
+        desc=f"Epoch {epoch}/{conf.epochs} [train]",
+        leave=False,
+        dynamic_ncols=True,
+    )
+    for batch_idx, data_nn in enumerate(progress_bar, start=1):
+        data_time = time.perf_counter() - last_time
+        data_time_total += data_time
+        iter_start = time.perf_counter()
         data, target = data_nn
         target = target.long()
         domain_target = []
@@ -226,18 +352,59 @@ def train(model, loss, train_dataloader, optimizer, scaler, epoch, conf):
             embedding, output = model(data_all)
             prob = F.log_softmax(output, dim=1)
             porb_list = torch.split(prob, data[0].size(0))
+            embedding_list = torch.split(embedding, data[0].size(0))
             cls_loss = loss[0](porb_list[num_data - 1], target)
             con_loss = loss[1](embedding.unsqueeze(1), target_all, adv=False)
             adv_con_loss = loss[1](embedding.unsqueeze(1), domain_target, adv=True)
-            result_loss = cls_loss + conf.lambda_con[0] * con_loss + conf.lambda_con[1] * adv_con_loss
+            sem_loss = torch.tensor(0.0, device=embedding.device)
+
+            if conf.semantic_mix:
+                sem_pack = semantic_mixup(
+                    embedding_list[num_data - 1],
+                    target,
+                    num_classes=conf.num_classes,
+                    alpha=conf.semantic_mix_alpha,
+                    prob=conf.semantic_mix_p,
+                )
+                if sem_pack is not None:
+                    mixed_embeddings, mixed_targets = sem_pack
+                    mixed_logits = model.classify_embedding(mixed_embeddings)
+                    sem_loss = soft_cross_entropy(mixed_logits, mixed_targets)
+
+            result_loss = (
+                cls_loss
+                + conf.lambda_con[0] * con_loss
+                + conf.lambda_con[1] * adv_con_loss
+                + conf.lambda_sem * sem_loss
+            )
 
         scaler.scale(result_loss).backward()
         scaler.step(optimizer)
         scaler.update()
         # -------------
-        all_loss += result_loss.item()*data[0].size(0)
+        batch_size = data[0].size(0)
+        num_samples += batch_size
+        all_loss += result_loss.item()*batch_size
         pred = porb_list[num_data -  1].argmax(dim=1, keepdim=True)
         correct += pred.eq(target.view_as(pred)).sum().item()
+        iter_time = time.perf_counter() - iter_start
+        iter_time_total += iter_time
+        if conf.progress and tqdm is not None:
+            avg_loss = all_loss / max(num_samples, 1)
+            avg_acc = 100.0 * correct / max(num_samples, 1)
+            current_lr = optimizer.param_groups[0]["lr"]
+            postfix = {
+                "loss": f"{avg_loss:.4f}",
+                "acc": f"{avg_acc:.1f}%",
+                "lr": f"{current_lr:.2e}",
+                "data": f"{data_time_total / batch_idx:.3f}s",
+                "iter": f"{iter_time_total / batch_idx:.3f}s",
+            }
+            if torch.cuda.is_available():
+                mem_gb = torch.cuda.memory_reserved() / (1024 ** 3)
+                postfix["mem"] = f"{mem_gb:.2f}G"
+            progress_bar.set_postfix(postfix)
+        last_time = time.perf_counter()
 
     print('Train Epoch: {} \tLoss: {:.6f}, Accuracy: {}/{} ({:0f}%)\n'.format(
         epoch,
@@ -247,12 +414,19 @@ def train(model, loss, train_dataloader, optimizer, scaler, epoch, conf):
         100.0 * correct / len(train_dataloader.dataset))
     )
 
-def evaluate(model, loss, test_dataloader, epoch):
+def evaluate(model, loss, test_dataloader, epoch, progress=False, total_epochs=None):
     model.eval()
     test_loss = 0
     correct = 0
+    progress_bar = maybe_tqdm(
+        test_dataloader,
+        enabled=progress,
+        desc=f"Epoch {epoch}/{total_epochs or epoch} [val]",
+        leave=False,
+        dynamic_ncols=True,
+    )
     with torch.no_grad():
-        for data, target in test_dataloader:
+        for data, target in progress_bar:
             target = target.long()
             if torch.cuda.is_available():
                 data = data.cuda()
@@ -262,6 +436,11 @@ def evaluate(model, loss, test_dataloader, epoch):
             test_loss += loss[0](output, target).item()*data.size(0)
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
+            if progress and tqdm is not None:
+                running_count = min((progress_bar.n if hasattr(progress_bar, "n") else 0) + data.size(0), len(test_dataloader.dataset))
+                avg_loss = test_loss / max(running_count, 1)
+                avg_acc = 100.0 * correct / max(running_count, 1)
+                progress_bar.set_postfix({"loss": f"{avg_loss:.4f}", "acc": f"{avg_acc:.1f}%"})
 
     test_loss /= len(test_dataloader.dataset)
     fmt = '\nValidation set: Loss: {:.4f}, Accuracy: {}/{} ({:0f}%)\n'
@@ -276,11 +455,18 @@ def evaluate(model, loss, test_dataloader, epoch):
 
     return test_loss
 
-def test(model, test_dataloader, desc="Test"):
+def test(model, test_dataloader, desc="Test", progress=False):
     model.eval()
     correct = 0
+    progress_bar = maybe_tqdm(
+        test_dataloader,
+        enabled=progress,
+        desc=desc,
+        leave=False,
+        dynamic_ncols=True,
+    )
     with torch.no_grad():
-        for data, target in test_dataloader:
+        for data, target in progress_bar:
             target = target.long()
             if torch.cuda.is_available():
                 data = data.cuda()
@@ -288,6 +474,9 @@ def test(model, test_dataloader, desc="Test"):
             embedding, output = model(data)
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
+            if progress and tqdm is not None:
+                running_count = min((progress_bar.n if hasattr(progress_bar, "n") else 0) + data.size(0), len(test_dataloader.dataset))
+                progress_bar.set_postfix({"acc": f"{100.0 * correct / max(running_count, 1):.1f}%"})
 
     acc = correct / len(test_dataloader.dataset)
     print(f"{desc}: {acc:.4f}")
@@ -299,7 +488,7 @@ def train_and_evaluate(model, loss, train_loader, val_loader, optimizer, scaler,
     best_loss = float('inf')
     for epoch in range(1, epochs + 1):
         train(model, loss, train_loader, optimizer, scaler, epoch, conf)
-        val_loss = evaluate(model, loss, val_loader, epoch)
+        val_loss = evaluate(model, loss, val_loader, epoch, progress=conf.progress, total_epochs=epochs)
         if val_loss < best_loss:
             print(f"Saving model at epoch {epoch} with loss {val_loss:.4f}")
             best_loss = val_loss
@@ -308,36 +497,14 @@ def train_and_evaluate(model, loss, train_loader, val_loader, optimizer, scaler,
 def main():
     conf = parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = conf.cuda
+    torch.backends.cudnn.benchmark = bool(conf.benchmark)
+    torch.backends.cudnn.deterministic = not conf.benchmark
 
     num_classes = 16 if conf.dataset_name == "ORACLE" else 6
     input_shape = (2, 6000) if conf.dataset_name == "ORACLE" else (2, 256)
 
-    save_path = (
-        f"weight/Dataset={conf.dataset_name}_"
-        f"Model={conf.model_size}_"
-        f"main_aug_depth={','.join(map(str, conf.main_aug_depth))}_"
-        f"aux_aug_depth={','.join(map(str, conf.aux_aug_depth))}_"
-        f"lambda={','.join(map(str, conf.lambda_con))}_"
-        f"backdoor={int(conf.backdoor)}_"
-        f"target={conf.target_label}_"
-        f"pr={conf.poison_rate}_"
-        f"tt={conf.trigger_type}_"
-        f"ta={conf.trigger_amp}_"
-        f"tl={conf.trigger_len}_"
-        f"tp={conf.trigger_pos}_"
-        f"tf={conf.trigger_freq}_"
-        f"tseg={conf.trigger_segments}_"
-        f"tanch={conf.trigger_anchor_positions.replace(',', '-')}_"
-        f"tj={conf.trigger_jitter}_"
-        f"tiq={conf.trigger_iq_mode}_"
-        f"tad={int(conf.trigger_adaptive_amp)}_"
-        f"pca={int(conf.poison_channel_aug)}_"
-        f"cph={conf.channel_phase_max_deg}_"
-        f"cs={conf.channel_scale_min}-{conf.channel_scale_max}_"
-        f"csh={conf.channel_shift_max}_"
-        f"csnr={conf.channel_snr_db}_"
-        f"ts={conf.trigger_stage}.pth"
-    )
+    save_path = build_save_path(conf)
+    print(f"Checkpoint path: {save_path}")
 
     trigger_cfg = {
         "trigger_type": conf.trigger_type,
@@ -361,6 +528,27 @@ def main():
     }
     
     dataset = get_dataset(conf.dataset_name)
+    conf.num_classes = num_classes
+    train_loader_kwargs = {
+        "num_workers": conf.num_workers,
+        "pin_memory": conf.pin_memory,
+    }
+    if conf.num_workers > 0 and conf.persistent_workers:
+        train_loader_kwargs["persistent_workers"] = True
+    if conf.num_workers > 0:
+        data_loader_sig = inspect.signature(DataLoader.__init__)
+        if "prefetch_factor" in data_loader_sig.parameters:
+            train_loader_kwargs["prefetch_factor"] = conf.prefetch_factor
+
+    eval_loader_kwargs = {
+        "num_workers": 0 if os.name == "nt" else conf.num_workers,
+        "pin_memory": conf.pin_memory,
+    }
+    if eval_loader_kwargs["num_workers"] > 0:
+        data_loader_sig = inspect.signature(DataLoader.__init__)
+        if "prefetch_factor" in data_loader_sig.parameters:
+            eval_loader_kwargs["prefetch_factor"] = conf.prefetch_factor
+
     train_loader = DataLoader(
         AugDataset(
             dataset['train'][0], dataset['train'][1],
@@ -374,13 +562,24 @@ def main():
             trigger_stage=conf.trigger_stage
         ),
         batch_size=conf.batch_size,
-        shuffle=True
+        shuffle=True,
+        **train_loader_kwargs,
     )
 
     val_loader = DataLoader(TensorDataset(torch.Tensor(dataset['val'][0]), torch.Tensor(dataset['val'][1])), 
-                            batch_size=conf.test_batch_size, shuffle=True)
+                            batch_size=conf.test_batch_size, shuffle=True, **eval_loader_kwargs)
 
-    model = MACNN(in_channels=2, channels=get_param_value(conf.model_size), num_classes=num_classes)
+    mixstyle_layers = parse_layer_spec(conf.mixstyle_layers)
+    model = MACNN(
+        in_channels=2,
+        channels=get_param_value(conf.model_size),
+        num_classes=num_classes,
+        use_mixstyle=conf.use_mixstyle,
+        mixstyle_p=conf.mixstyle_p,
+        mixstyle_alpha=conf.mixstyle_alpha,
+        mixstyle_layers=mixstyle_layers,
+        mixstyle_mode=conf.mixstyle_mode,
+    )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=conf.lr, weight_decay=conf.wd)
     scaler = GradScaler("cuda", enabled=conf.amp and torch.cuda.is_available())
@@ -404,7 +603,12 @@ def main():
         model = MACNN(
             in_channels=2,
             channels=get_param_value(conf.model_size),
-            num_classes=num_classes
+            num_classes=num_classes,
+            use_mixstyle=conf.use_mixstyle,
+            mixstyle_p=conf.mixstyle_p,
+            mixstyle_alpha=conf.mixstyle_alpha,
+            mixstyle_layers=mixstyle_layers,
+            mixstyle_mode=conf.mixstyle_mode,
         )
         state_dict = torch.load(save_path, map_location="cpu")
         model.load_state_dict(state_dict)
@@ -422,9 +626,10 @@ def main():
                 torch.Tensor(dataset['test_s'][1])
             ),
             batch_size=conf.test_batch_size,
-            shuffle=False
+            shuffle=False,
+            **eval_loader_kwargs,
         )
-        clean_acc_s = test(model, clean_source_loader, desc="Clean Source Acc")
+        clean_acc_s = test(model, clean_source_loader, desc="Clean Source Acc", progress=conf.progress)
 
         # -------------------------
         # 2) Source ASR 测试
@@ -443,9 +648,10 @@ def main():
                     torch.Tensor(y_bd_s)
                 ),
                 batch_size=conf.test_batch_size,
-                shuffle=False
+                shuffle=False,
+                **eval_loader_kwargs,
             )
-            asr_s = test(model, bd_source_loader, desc="Source ASR")
+            asr_s = test(model, bd_source_loader, desc="Source ASR", progress=conf.progress)
 
         # -------------------------
         # 3) 干净 Target 测试
@@ -458,9 +664,10 @@ def main():
                     torch.Tensor(y_test)
                 ),
                 batch_size=conf.test_batch_size,
-                shuffle=False
+                shuffle=False,
+                **eval_loader_kwargs,
             )
-            clean_acc_t = test(model, clean_target_loader, desc=f"Clean Target Acc #{i + 1}")
+            clean_acc_t = test(model, clean_target_loader, desc=f"Clean Target Acc #{i + 1}", progress=conf.progress)
 
             # -------------------------
             # 4) Target ASR 测试
@@ -479,9 +686,10 @@ def main():
                         torch.Tensor(y_bd_t)
                     ),
                     batch_size=conf.test_batch_size,
-                    shuffle=False
+                    shuffle=False,
+                    **eval_loader_kwargs,
                 )
-                asr_t = test(model, bd_target_loader, desc=f"Target ASR #{i + 1}")
+                asr_t = test(model, bd_target_loader, desc=f"Target ASR #{i + 1}", progress=conf.progress)
 
 if __name__ == "__main__":
     main()

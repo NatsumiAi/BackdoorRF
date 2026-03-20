@@ -117,6 +117,11 @@ def prepare_metrics(rows):
                 "clean_target_mean": float(np.mean(clean_targets)) if clean_targets else math.nan,
                 "target_asr_mean": float(np.mean(asr_targets)) if asr_targets else math.nan,
                 "asr_gap": to_float(row.get("source_asr", "")) - (float(np.mean(asr_targets)) if asr_targets else math.nan),
+                "use_mixstyle": int(to_float(row.get("use_mixstyle", 0)) if str(row.get("use_mixstyle", "")).strip() else 0),
+                "semantic_mix": int(to_float(row.get("semantic_mix", 0)) if str(row.get("semantic_mix", "")).strip() else 0),
+                "mixstyle_layers": row.get("mixstyle_layers", ""),
+                "trigger_stage": row.get("trigger_stage", ""),
+                "poison_channel_aug": int(to_float(row.get("poison_channel_aug", 0)) if str(row.get("poison_channel_aug", "")).strip() else 0),
                 "clean_targets": clean_target_series,
                 "asr_targets": asr_target_series,
             }
@@ -383,6 +388,107 @@ def plot_trigger_schematic(outdir):
     save_figure(fig, outdir, "trigger_schematic")
 
 
+def asa_label(item):
+    if item["exp_name"] == "baseline_clean":
+        return "Baseline"
+    parts = []
+    if item["use_mixstyle"]:
+        parts.append("MixStyle")
+    if item["semantic_mix"]:
+        parts.append("SemanticMix")
+    if item["trigger_stage"] == "eot":
+        parts.append("EOT")
+    if item["poison_channel_aug"]:
+        parts.append("Channel")
+    if not parts:
+        parts.append(item["exp_name"])
+    return "+".join(parts)
+
+
+def plot_asa_controls(metrics, outdir):
+    candidates = [item for item in metrics if item["exp_name"] != "baseline_clean"]
+    if not candidates:
+        return
+
+    labels = [shorten_name(asa_label(item)) for item in candidates]
+    x = np.arange(len(candidates))
+    width = 0.34
+
+    clean_target = np.array([item["clean_target_mean"] for item in candidates], dtype=float)
+    target_asr = np.array([item["target_asr_mean"] for item in candidates], dtype=float)
+    gaps = np.array([item["asr_gap"] for item in candidates], dtype=float)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.0), constrained_layout=True)
+
+    bars1 = axes[0].bar(x - width / 2, clean_target, width, color="#577590", label="Target clean acc")
+    bars2 = axes[0].bar(x + width / 2, target_asr, width, color="#F94144", label="Target mean ASR")
+    axes[0].set_title("ASA Controls vs. Cross-Domain Backdoor")
+    axes[0].set_ylabel("Score")
+    axes[0].set_ylim(0, 1.08)
+    axes[0].set_xticks(x, labels)
+    axes[0].legend(frameon=False, loc="upper left")
+    annotate_bars(axes[0], bars1)
+    annotate_bars(axes[0], bars2)
+
+    axes[1].set_title("ASA Robustness / Vulnerability Map")
+    axes[1].set_xlabel("ASR Gap")
+    axes[1].set_ylabel("Target Mean ASR")
+    axes[1].set_xlim(min(-0.02, np.nanmin(gaps) - 0.05), max(0.5, np.nanmax(gaps) + 0.05))
+    axes[1].set_ylim(0, 1.02)
+    for item in candidates:
+        x_val = item["asr_gap"]
+        y_val = item["target_asr_mean"]
+        if math.isnan(x_val) or math.isnan(y_val):
+            continue
+        marker = "o" if item["use_mixstyle"] else "s"
+        size = 140 if item["semantic_mix"] else 90
+        color = "#2A9D8F" if item["semantic_mix"] else "#4D908E"
+        axes[1].scatter(x_val, y_val, s=size, marker=marker, color=color, edgecolors="white", linewidths=0.9)
+        axes[1].annotate(asa_label(item), (x_val, y_val), textcoords="offset points", xytext=(6, 6), fontsize=8)
+
+    save_figure(fig, outdir, "asa_controls")
+
+
+def plot_asa_ablation(metrics, outdir):
+    selected = []
+    priority_names = [
+        "baseline_clean",
+        "single_patch_post",
+        "sparse_post",
+        "sparse_eot",
+        "sparse_eot_channel",
+    ]
+    for name in priority_names:
+        match = next((item for item in metrics if item["exp_name"] == name), None)
+        if match is not None:
+            selected.append(match)
+
+    if len(selected) < 2:
+        return
+
+    labels = [item["label"] for item in selected]
+    x = np.arange(len(selected))
+    width = 0.25
+
+    clean_target = np.array([item["clean_target_mean"] for item in selected], dtype=float)
+    target_asr = np.array([item["target_asr_mean"] for item in selected], dtype=float)
+    source_asr = np.array([item["source_asr"] for item in selected], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(11.6, 5.0), constrained_layout=True)
+    b1 = ax.bar(x - width, clean_target, width, color="#577590", label="Target clean acc")
+    b2 = ax.bar(x, source_asr, width, color="#C06C84", label="Source ASR")
+    b3 = ax.bar(x + width, target_asr, width, color="#F67280", label="Target mean ASR")
+    ax.set_title("Progressive Backdoor Strengthening under ASA-Style Robustness")
+    ax.set_ylabel("Score")
+    ax.set_ylim(0, 1.08)
+    ax.set_xticks(x, labels)
+    ax.legend(frameon=False, loc="upper left", ncol=3)
+    annotate_bars(ax, b1)
+    annotate_bars(ax, b2)
+    annotate_bars(ax, b3)
+    save_figure(fig, outdir, "asa_ablation")
+
+
 def save_figure(fig, outdir, stem):
     png_path = os.path.join(outdir, f"{stem}.png")
     pdf_path = os.path.join(outdir, f"{stem}.pdf")
@@ -415,6 +521,8 @@ def main():
     plot_asr_gap(metrics, args.outdir)
     plot_transfer_trajectory(metrics, args.outdir)
     plot_trigger_schematic(args.outdir)
+    plot_asa_controls(metrics, args.outdir)
+    plot_asa_ablation(metrics, args.outdir)
 
     print(f"Saved figures to {args.outdir}")
 
