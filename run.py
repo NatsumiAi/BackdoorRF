@@ -19,7 +19,6 @@ def get_result_fields():
         "dataset_name", "model_size", "epochs",
         "main_aug_depth", "aux_aug_depth",
         "num_workers", "pin_memory", "persistent_workers", "prefetch_factor", "benchmark",
-        "progress",
         "use_mixstyle", "mixstyle_p", "mixstyle_alpha", "mixstyle_layers", "mixstyle_mode",
         "semantic_mix", "semantic_mix_p", "semantic_mix_alpha", "lambda_sem",
         "backdoor", "target_label", "poison_rate",
@@ -66,16 +65,19 @@ def resolve_result_csv_path(csv_file):
 COMMON_ARGS = {
     "dataset_name": "ORACLE",     # ORACLE / WiSig
     "mode": "train_test",
-    "model_size": "M",
-    "epochs": 300,
+    "model_size": "S",
+    "epochs": 500,
     "batch_size": 32,
     "test_batch_size": 16,
-    "num_workers": 6,
+    "num_workers": 8,
     "pin_memory": True,
     "persistent_workers": True,
     "prefetch_factor": 2,
     "benchmark": True,
-    "progress": True,
+    "tensorboard": True,
+    "monitor_backdoor": True,
+    "monitor_interval": 5,
+    "monitor_subset": 256,
     "lr": 0.001,
     "main_aug_depth": [4],
     "aux_aug_depth": [1],
@@ -92,6 +94,7 @@ COMMON_ARGS = {
     "semantic_mix_p": 0.5,
     "semantic_mix_alpha": 0.4,
     "lambda_sem": 0.5,
+    "lambda_pos": 0.05,
 }
 
 # 默认后门参数
@@ -108,6 +111,9 @@ BACKDOOR_ARGS = {
     "trigger_jitter": 16,
     "trigger_iq_mode": "quadrature",
     "trigger_adaptive_amp": True,
+    "trigger_position_mode": "hybrid", # fixed / random_shift / energy_adaptive / hybrid
+    "trigger_global_shift": 16,
+    "trigger_hybrid_ratio": 0.2,
     "poison_channel_aug": True,
     "channel_phase_max_deg": 15.0,
     "channel_scale_min": 0.9,
@@ -119,71 +125,82 @@ BACKDOOR_ARGS = {
 # 要跑的实验列表
 EXPERIMENTS = [
     # {
-    #     "exp_name": "baseline_clean",
-    #     "backdoor": False
+    #     "exp_name": "oracle_clean",
+    #     "backdoor": False,
     # },
     # {
-    #     "exp_name": "single_patch_post",
+    #     "exp_name": "oracle_sine_post",
     #     "backdoor": True,
     #     "trigger_stage": "post",
     #     "backdoor_overrides": {
     #         "trigger_type": "sine",
-    #         "trigger_len": 96,
+    #         "trigger_amp": 0.08,
+    #         "trigger_len": 128,
     #         "trigger_pos": "tail",
     #         "trigger_segments": 1,
     #         "trigger_anchor_positions": "tail",
     #         "trigger_jitter": 0,
     #         "trigger_adaptive_amp": False,
+    #         "trigger_position_mode": "fixed",
+    #         "trigger_global_shift": 0,
+    #         "trigger_hybrid_ratio": 0.0,
+    #         "poison_channel_aug": False,
+    #     }
+    # },
+    # {
+    #     "exp_name": "oracle_old_sparse",
+    #     "backdoor": True,
+    #     "trigger_stage": "post",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sparse_sine",
+    #         "trigger_amp": 0.08,
+    #         "trigger_len": 160,
+    #         "trigger_segments": 2,
+    #         "trigger_anchor_positions": "head,middle,tail",
+    #         "trigger_jitter": 16,
+    #         "trigger_adaptive_amp": True,
+    #         "trigger_position_mode": "fixed",
+    #         "trigger_global_shift": 0,
+    #         "trigger_hybrid_ratio": 0.0,
+    #         "poison_channel_aug": False,
+    #     }
+    # },
+    # {
+    #     "exp_name": "oracle_paper_sparse",
+    #     "backdoor": True,
+    #     "trigger_stage": "post",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sparse_sine",
+    #         "trigger_amp": 0.1,
+    #         "trigger_len": 512,
+    #         "trigger_segments": 2,
+    #         "trigger_anchor_positions": "middle,tail",
+    #         "trigger_jitter": 4,
+    #         "trigger_adaptive_amp": True,
+    #         "trigger_position_mode": "energy_adaptive",
+    #         "trigger_global_shift": 8,
+    #         "trigger_hybrid_ratio": 0.0,
     #         "poison_channel_aug": False,
     #     }
     # },
     {
-        "exp_name": "sparse_post",
+        "exp_name": "oracle_hybrid_sparse",
         "backdoor": True,
         "trigger_stage": "post",
         "backdoor_overrides": {
             "trigger_type": "sparse_sine",
-            "trigger_len": 128,
+            "trigger_amp": 0.12,
+            "trigger_len": 2048,
             "trigger_segments": 2,
             "trigger_anchor_positions": "head,middle,tail",
-            "trigger_jitter": 16,
+            "trigger_jitter": 10,
             "trigger_adaptive_amp": True,
+            "trigger_position_mode": "hybrid",
+            "trigger_global_shift": 16,
+            "trigger_hybrid_ratio": 0.2,
             "poison_channel_aug": False,
         }
     },
-    # {
-    #     "exp_name": "sparse_eot",
-    #     "backdoor": True,
-    #     "trigger_stage": "eot",
-    #     "backdoor_overrides": {
-    #         "trigger_type": "sparse_sine",
-    #         "trigger_len": 96,
-    #         "trigger_segments": 3,
-    #         "trigger_anchor_positions": "head,middle,tail",
-    #         "trigger_jitter": 16,
-    #         "trigger_adaptive_amp": True,
-    #         "poison_channel_aug": False,
-    #     }
-    # },
-    # {
-    #     "exp_name": "sparse_eot_channel",
-    #     "backdoor": True,
-    #     "trigger_stage": "eot",
-    #     "backdoor_overrides": {
-    #         "trigger_type": "sparse_sine",
-    #         "trigger_len": 96,
-    #         "trigger_segments": 3,
-    #         "trigger_anchor_positions": "head,middle,tail",
-    #         "trigger_jitter": 16,
-    #         "trigger_adaptive_amp": True,
-    #         "poison_channel_aug": True,
-    #         "channel_phase_max_deg": 15.0,
-    #         "channel_scale_min": 0.9,
-    #         "channel_scale_max": 1.1,
-    #         "channel_shift_max": 4,
-    #         "channel_snr_db": 25.0,
-    #     }
-    # },
 ]
 # ===============================
 
@@ -194,7 +211,7 @@ def ensure_dir(path):
 
 
 def build_command(common_args, exp_cfg, backdoor_args):
-    cmd = [PYTHON_EXE, MAIN_FILE]
+    cmd = [PYTHON_EXE, "-u", MAIN_FILE]
     exp_backdoor_args = dict(backdoor_args)
     exp_backdoor_args.update(exp_cfg.get("backdoor_overrides", {}))
 
@@ -223,6 +240,9 @@ def build_command(common_args, exp_cfg, backdoor_args):
         cmd.extend(["--trigger_anchor_positions", str(exp_backdoor_args["trigger_anchor_positions"])])
         cmd.extend(["--trigger_jitter", str(exp_backdoor_args["trigger_jitter"])])
         cmd.extend(["--trigger_iq_mode", str(exp_backdoor_args["trigger_iq_mode"])])
+        cmd.extend(["--trigger_position_mode", str(exp_backdoor_args["trigger_position_mode"])])
+        cmd.extend(["--trigger_global_shift", str(exp_backdoor_args["trigger_global_shift"])])
+        cmd.extend(["--trigger_hybrid_ratio", str(exp_backdoor_args["trigger_hybrid_ratio"])])
         if exp_backdoor_args.get("trigger_adaptive_amp", False):
             cmd.append("--trigger_adaptive_amp")
         if exp_backdoor_args.get("poison_channel_aug", False):
@@ -302,7 +322,9 @@ def run_one_experiment(exp_cfg):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            universal_newlines=True
+            universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
         )
 
         for line in process.stdout:
@@ -333,7 +355,6 @@ def run_one_experiment(exp_cfg):
         "persistent_workers": int(COMMON_ARGS.get("persistent_workers", False)),
         "prefetch_factor": COMMON_ARGS.get("prefetch_factor", ""),
         "benchmark": int(COMMON_ARGS.get("benchmark", False)),
-        "progress": int(COMMON_ARGS.get("progress", False)),
         "use_mixstyle": int(COMMON_ARGS.get("use_mixstyle", False)),
         "mixstyle_p": COMMON_ARGS.get("mixstyle_p", ""),
         "mixstyle_alpha": COMMON_ARGS.get("mixstyle_alpha", ""),

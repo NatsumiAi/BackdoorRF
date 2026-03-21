@@ -44,9 +44,11 @@ def latest_rows(rows):
     grouped = OrderedDict()
     for row in rows:
         exp_name = row.get("exp_name", "")
+        dataset_name = row.get("dataset_name", "")
         stamp = row.get("time", "")
-        if exp_name not in grouped or stamp >= grouped[exp_name].get("time", ""):
-            grouped[exp_name] = row
+        group_key = (dataset_name, exp_name)
+        if group_key not in grouped or stamp >= grouped[group_key].get("time", ""):
+            grouped[group_key] = row
     return list(grouped.values())
 
 
@@ -110,6 +112,7 @@ def prepare_metrics(rows):
 
         metrics.append(
             {
+                "dataset_name": row.get("dataset_name", "unknown"),
                 "exp_name": row.get("exp_name", "unknown"),
                 "label": shorten_name(row.get("exp_name", "unknown")),
                 "clean_source_acc": to_float(row.get("clean_source_acc", "")),
@@ -226,6 +229,113 @@ def plot_overview(metrics, outdir):
         )
 
     save_figure(fig, outdir, "overview")
+
+
+def grouped_by_dataset(metrics):
+    grouped = OrderedDict()
+    for item in metrics:
+        grouped.setdefault(item["dataset_name"], []).append(item)
+    return grouped
+
+
+def get_dataset_colors(dataset_names):
+    base = ["#355C7D", "#F67280", "#2A9D8F", "#E9C46A"]
+    return {name: base[idx % len(base)] for idx, name in enumerate(dataset_names)}
+
+
+def get_exp_names(metrics):
+    names = []
+    for item in metrics:
+        if item["exp_name"] not in names:
+            names.append(item["exp_name"])
+    return names
+
+
+def plot_multi_dataset_overlay(metrics, outdir):
+    dataset_groups = grouped_by_dataset(metrics)
+    if len(dataset_groups) < 2:
+        return
+
+    exp_names = get_exp_names(metrics)
+    dataset_names = list(dataset_groups.keys())
+    dataset_colors = get_dataset_colors(dataset_names)
+    x = np.arange(len(exp_names))
+    width = 0.34 / max(len(dataset_names), 2)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.6, 4.9), constrained_layout=True)
+
+    for idx, dataset_name in enumerate(dataset_names):
+        group_map = {item["exp_name"]: item for item in dataset_groups[dataset_name]}
+        offset = (idx - (len(dataset_names) - 1) / 2) * width
+        clean_target = np.array([group_map.get(name, {}).get("clean_target_mean", math.nan) for name in exp_names], dtype=float)
+        target_asr = np.array([group_map.get(name, {}).get("target_asr_mean", math.nan) for name in exp_names], dtype=float)
+        gaps = np.array([group_map.get(name, {}).get("asr_gap", math.nan) for name in exp_names], dtype=float)
+
+        axes[0].bar(x + offset, clean_target, width=width, color=dataset_colors[dataset_name], alpha=0.85, label=dataset_name)
+        axes[1].bar(x + offset, target_asr, width=width, color=dataset_colors[dataset_name], alpha=0.85, label=dataset_name)
+        axes[2].plot(x, gaps, marker="o", linewidth=1.8, markersize=6, color=dataset_colors[dataset_name], label=dataset_name)
+
+    exp_labels = [shorten_name(name) for name in exp_names]
+    axes[0].set_title("Target Clean Accuracy")
+    axes[0].set_ylabel("Accuracy")
+    axes[0].set_ylim(0, 1.08)
+    axes[0].set_xticks(x, exp_labels)
+
+    axes[1].set_title("Target Mean ASR")
+    axes[1].set_ylabel("ASR")
+    axes[1].set_ylim(0, 1.08)
+    axes[1].set_xticks(x, exp_labels)
+
+    axes[2].set_title("Cross-Domain Transfer Loss")
+    axes[2].set_ylabel(r"ASR Gap: Source - Target")
+    axes[2].set_xticks(x, exp_labels)
+    axes[2].axhline(0.0, color="#777777", linewidth=1.0)
+
+    axes[0].legend(frameon=False, loc="upper left")
+    axes[1].legend(frameon=False, loc="upper left")
+    axes[2].legend(frameon=False, loc="upper left")
+
+    save_figure(fig, outdir, "multi_dataset_overlay")
+
+
+def plot_dual_dataset_tradeoff(metrics, outdir):
+    dataset_groups = grouped_by_dataset(metrics)
+    if len(dataset_groups) < 2:
+        return
+
+    fig, ax = plt.subplots(figsize=(7.8, 6.0), constrained_layout=True)
+    dataset_names = list(dataset_groups.keys())
+    dataset_colors = get_dataset_colors(dataset_names)
+
+    for dataset_name, items in dataset_groups.items():
+        items = sorted(items, key=lambda item: infer_stage_rank(item["exp_name"]))
+        xs = []
+        ys = []
+        for item in items:
+            x_val = item["asr_gap"]
+            y_val = item["target_asr_mean"]
+            if math.isnan(x_val) or math.isnan(y_val):
+                continue
+            xs.append(x_val)
+            ys.append(y_val)
+            ax.scatter(x_val, y_val, s=120, color=dataset_colors[dataset_name], edgecolors="white", linewidths=0.9)
+            ax.annotate(
+                f"{dataset_name}-{item['exp_name']}",
+                (x_val, y_val),
+                textcoords="offset points",
+                xytext=(6, 6),
+                fontsize=8,
+            )
+        if len(xs) >= 2:
+            ax.plot(xs, ys, color=dataset_colors[dataset_name], linewidth=1.8, alpha=0.9, label=dataset_name)
+        elif len(xs) == 1:
+            ax.plot(xs, ys, color=dataset_colors[dataset_name], linewidth=1.8, alpha=0.9, label=dataset_name)
+
+    ax.set_title("Transferability Trade-off Across Training Sets")
+    ax.set_xlabel(r"ASR Gap: Source - Target Mean (lower is better)")
+    ax.set_ylabel("Target Mean ASR (higher is better)")
+    ax.legend(frameon=False, loc="upper right")
+    save_figure(fig, outdir, "dual_dataset_tradeoff")
 
 
 def plot_per_target(metrics, target_indices, outdir):
@@ -520,6 +630,8 @@ def main():
     plot_per_target(metrics, target_indices, args.outdir)
     plot_asr_gap(metrics, args.outdir)
     plot_transfer_trajectory(metrics, args.outdir)
+    plot_multi_dataset_overlay(metrics, args.outdir)
+    plot_dual_dataset_tradeoff(metrics, args.outdir)
     plot_trigger_schematic(args.outdir)
     plot_asa_controls(metrics, args.outdir)
     plot_asa_ablation(metrics, args.outdir)

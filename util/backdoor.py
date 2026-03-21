@@ -22,6 +22,27 @@ def _resolve_amp(x, amp, adaptive_amp=False):
     return float(amp)
 
 
+def _window_energy(x, window):
+    signal_power = np.sum(np.square(x), axis=0)
+    kernel = np.ones(window, dtype=np.float32) / max(window, 1)
+    return np.convolve(signal_power, kernel, mode="same")
+
+
+def _sample_energy_position(x, seg_length, prefer="high"):
+    energy = _window_energy(x, seg_length)
+    valid = energy[: x.shape[1] - seg_length + 1]
+    if valid.size == 0:
+        return 0
+
+    order = np.argsort(valid)
+    bucket = max(1, valid.size // 5)
+    if prefer == "high":
+        candidates = order[-bucket:]
+    else:
+        candidates = order[:bucket]
+    return int(np.random.choice(candidates))
+
+
 def _build_trigger_pattern(trigger_type, amp, length, freq, iq_mode="quadrature"):
     t = np.arange(length, dtype=np.float32)
 
@@ -69,6 +90,9 @@ def add_sparse_trigger(
     jitter=0,
     adaptive_amp=False,
     iq_mode="quadrature",
+    position_mode="fixed",
+    global_shift=0,
+    hybrid_ratio=0.25,
 ):
     x = np.array(x, dtype=np.float32, copy=True)
     assert x.ndim == 2 and x.shape[0] == 2, f"expect [2, L], got {x.shape}"
@@ -95,9 +119,24 @@ def add_sparse_trigger(
 
     for seg_idx in range(num_segments):
         anchor = anchors[seg_idx % len(anchors)]
-        start = _get_start(L, seg_length, anchor if anchor != "random" else pos)
+        anchor_start = _get_start(L, seg_length, anchor if anchor != "random" else pos)
         if anchor == "random":
-            start = _get_start(L, seg_length, "random")
+            anchor_start = _get_start(L, seg_length, "random")
+
+        if position_mode == "energy_adaptive":
+            prefer = "high" if seg_idx % 2 == 0 else "low"
+            start = _sample_energy_position(x, seg_length, prefer=prefer)
+        elif position_mode == "hybrid":
+            prefer = "high" if seg_idx % 2 == 0 else "low"
+            energy_start = _sample_energy_position(x, seg_length, prefer=prefer)
+            blend = float(np.clip(hybrid_ratio, 0.0, 1.0))
+            start = int(round((1.0 - blend) * anchor_start + blend * energy_start))
+        else:
+            start = anchor_start
+
+        if global_shift > 0 and position_mode in ["random_shift", "energy_adaptive", "hybrid"]:
+            start += np.random.randint(-global_shift, global_shift + 1)
+            start = int(np.clip(start, 0, L - seg_length))
 
         if jitter > 0:
             start += np.random.randint(-jitter, jitter + 1)
@@ -120,6 +159,9 @@ def add_trigger(
     jitter=0,
     adaptive_amp=False,
     iq_mode="quadrature",
+    position_mode="fixed",
+    global_shift=0,
+    hybrid_ratio=0.25,
 ):
     """
     x: shape [2, L]
@@ -141,6 +183,9 @@ def add_trigger(
             jitter=jitter,
             adaptive_amp=adaptive_amp,
             iq_mode=iq_mode,
+            position_mode=position_mode,
+            global_shift=global_shift,
+            hybrid_ratio=hybrid_ratio,
         )
 
     L = x.shape[1]
