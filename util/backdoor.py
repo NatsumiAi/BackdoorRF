@@ -215,3 +215,10 @@ def make_poisoned_eval_set(x, y, target_label, trigger_cfg):
 
     y_sel = np.full(len(x_sel), target_label, dtype=y.dtype)
     return x_sel, y_sel
+
+
+def make_targeted_eval_subset(x, y, target_label):
+    idx = y != target_label
+    x_sel = x[idx].copy()
+    y_sel = np.full(len(x_sel), target_label, dtype=y.dtype)
+    return x_sel, y_sel

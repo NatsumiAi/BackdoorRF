@@ -66,7 +66,7 @@ COMMON_ARGS = {
     "dataset_name": "ORACLE",     # ORACLE / WiSig
     "mode": "train_test",
     "model_size": "S",
-    "epochs": 500,
+    "epochs": 200,
     "batch_size": 32,
     "test_batch_size": 16,
     "num_workers": 8,
@@ -75,6 +75,15 @@ COMMON_ARGS = {
     "prefetch_factor": 2,
     "benchmark": True,
     "tensorboard": True,
+    "adapt_target_clean": False,
+    "adapt_epochs": 10,
+    "adapt_lr": 1e-5,
+    "adapt_batch_size": 32,
+    "adapt_wd": 0.0,
+    "adapt_val_ratio": 0.2,
+    "adapt_subset_ratio": 1.0,
+    "adapt_seed": 2023,
+    "adapt_save_suffix": "_adapt",
     "monitor_backdoor": True,
     "monitor_interval": 5,
     "monitor_subset": 256,
@@ -95,6 +104,7 @@ COMMON_ARGS = {
     "semantic_mix_alpha": 0.4,
     "lambda_sem": 0.5,
     "lambda_pos": 0.05,
+    "trigger_lr": 1e-3,
 }
 
 # 默认后门参数
@@ -128,33 +138,33 @@ EXPERIMENTS = [
     #     "exp_name": "oracle_clean",
     #     "backdoor": False,
     # },
-    # {
-    #     "exp_name": "oracle_sine_post",
-    #     "backdoor": True,
-    #     "trigger_stage": "post",
-    #     "backdoor_overrides": {
-    #         "trigger_type": "sine",
-    #         "trigger_amp": 0.08,
-    #         "trigger_len": 128,
-    #         "trigger_pos": "tail",
-    #         "trigger_segments": 1,
-    #         "trigger_anchor_positions": "tail",
-    #         "trigger_jitter": 0,
-    #         "trigger_adaptive_amp": False,
-    #         "trigger_position_mode": "fixed",
-    #         "trigger_global_shift": 0,
-    #         "trigger_hybrid_ratio": 0.0,
-    #         "poison_channel_aug": False,
-    #     }
-    # },
+    {
+        "exp_name": "oracle_sine_post",
+        "backdoor": True,
+        "trigger_stage": "post",
+        "backdoor_overrides": {
+            "trigger_type": "learnable_sparse",
+            "trigger_amp": 0.08,
+            "trigger_len": 256,
+            "trigger_pos": "tail",
+            "trigger_segments": 1,
+            "trigger_anchor_positions": "tail",
+            "trigger_jitter": 0,
+            "trigger_adaptive_amp": False,
+            "trigger_position_mode": "fixed",
+            "trigger_global_shift": 0,
+            "trigger_hybrid_ratio": 0.0,
+            "poison_channel_aug": False,
+        }
+    },
     # {
     #     "exp_name": "oracle_old_sparse",
     #     "backdoor": True,
     #     "trigger_stage": "post",
     #     "backdoor_overrides": {
     #         "trigger_type": "sparse_sine",
-    #         "trigger_amp": 0.08,
-    #         "trigger_len": 160,
+    #         "trigger_amp": 0.12,
+    #         "trigger_len": 2048,
     #         "trigger_segments": 2,
     #         "trigger_anchor_positions": "head,middle,tail",
     #         "trigger_jitter": 16,
@@ -171,10 +181,10 @@ EXPERIMENTS = [
     #     "trigger_stage": "post",
     #     "backdoor_overrides": {
     #         "trigger_type": "sparse_sine",
-    #         "trigger_amp": 0.1,
-    #         "trigger_len": 512,
+    #         "trigger_amp": 0.12,
+    #         "trigger_len": 2048,
     #         "trigger_segments": 2,
-    #         "trigger_anchor_positions": "middle,tail",
+    #         "trigger_anchor_positions": "head,middle,tail",
     #         "trigger_jitter": 4,
     #         "trigger_adaptive_amp": True,
     #         "trigger_position_mode": "energy_adaptive",
@@ -183,24 +193,24 @@ EXPERIMENTS = [
     #         "poison_channel_aug": False,
     #     }
     # },
-    {
-        "exp_name": "oracle_hybrid_sparse",
-        "backdoor": True,
-        "trigger_stage": "post",
-        "backdoor_overrides": {
-            "trigger_type": "sparse_sine",
-            "trigger_amp": 0.12,
-            "trigger_len": 2048,
-            "trigger_segments": 2,
-            "trigger_anchor_positions": "head,middle,tail",
-            "trigger_jitter": 10,
-            "trigger_adaptive_amp": True,
-            "trigger_position_mode": "hybrid",
-            "trigger_global_shift": 16,
-            "trigger_hybrid_ratio": 0.2,
-            "poison_channel_aug": False,
-        }
-    },
+    # {
+    #     "exp_name": "oracle_hybrid_sparse",
+    #     "backdoor": True,
+    #     "trigger_stage": "post",
+    #     "backdoor_overrides": {
+    #         "trigger_type": "sparse_sine",
+    #         "trigger_amp": 0.12,
+    #         "trigger_len": 2048,
+    #         "trigger_segments": 2,
+    #         "trigger_anchor_positions": "head,middle,tail",
+    #         "trigger_jitter": 10,
+    #         "trigger_adaptive_amp": True,
+    #         "trigger_position_mode": "hybrid",
+    #         "trigger_global_shift": 16,
+    #         "trigger_hybrid_ratio": 0.2,
+    #         "poison_channel_aug": False,
+    #     }
+    # },
 ]
 # ===============================
 

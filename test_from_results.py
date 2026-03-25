@@ -8,12 +8,35 @@ import sys
 PYTHON_EXE = sys.executable
 MAIN_FILE = "main.py"
 
+# ========= 可改参数区域 =========
+# 这里修改通过 test_from_results.py 触发 target clean adaptation 的默认参数。
+ADAPT_DEFAULTS = {
+    "adapt_target_clean": True,
+    "adapt_epochs": 100,
+    "adapt_lr": 1e-4,
+    "adapt_batch_size": 32,
+    "adapt_wd": 0.0,
+    "adapt_val_ratio": 0.2,
+    "adapt_subset_ratio": 1.0,
+    "adapt_seed": 2023,
+    "adapt_save_suffix": "_adapt",
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Select an experiment from results CSV and run test mode.")
     parser.add_argument("--csv", type=str, default="experiment_results.csv")
     parser.add_argument("--list_only", action="store_true")
     parser.add_argument("--index", type=int, default=0)
+    parser.add_argument("--adapt_target_clean", action="store_true", default=ADAPT_DEFAULTS["adapt_target_clean"])
+    parser.add_argument("--adapt_epochs", type=int, default=ADAPT_DEFAULTS["adapt_epochs"])
+    parser.add_argument("--adapt_lr", type=float, default=ADAPT_DEFAULTS["adapt_lr"])
+    parser.add_argument("--adapt_batch_size", type=int, default=ADAPT_DEFAULTS["adapt_batch_size"])
+    parser.add_argument("--adapt_wd", type=float, default=ADAPT_DEFAULTS["adapt_wd"])
+    parser.add_argument("--adapt_val_ratio", type=float, default=ADAPT_DEFAULTS["adapt_val_ratio"])
+    parser.add_argument("--adapt_subset_ratio", type=float, default=ADAPT_DEFAULTS["adapt_subset_ratio"])
+    parser.add_argument("--adapt_seed", type=int, default=ADAPT_DEFAULTS["adapt_seed"])
+    parser.add_argument("--adapt_save_suffix", type=str, default=ADAPT_DEFAULTS["adapt_save_suffix"])
     return parser.parse_args()
 
 
@@ -52,7 +75,7 @@ def append_bool(cmd, key, row_key, row):
         cmd.append(f"--{key}")
 
 
-def build_test_command(row):
+def build_test_command(row, args):
     cmd = [PYTHON_EXE, "-u", MAIN_FILE, "--mode", "test"]
 
     append_arg(cmd, "checkpoint_path", row.get("checkpoint_path", ""))
@@ -101,6 +124,17 @@ def build_test_command(row):
         append_arg(cmd, "channel_shift_max", row.get("channel_shift_max", ""))
         append_arg(cmd, "channel_snr_db", row.get("channel_snr_db", ""))
 
+    if args.adapt_target_clean:
+        cmd.append("--adapt_target_clean")
+        append_arg(cmd, "adapt_epochs", args.adapt_epochs)
+        append_arg(cmd, "adapt_lr", args.adapt_lr)
+        append_arg(cmd, "adapt_batch_size", args.adapt_batch_size)
+        append_arg(cmd, "adapt_wd", args.adapt_wd)
+        append_arg(cmd, "adapt_val_ratio", args.adapt_val_ratio)
+        append_arg(cmd, "adapt_subset_ratio", args.adapt_subset_ratio)
+        append_arg(cmd, "adapt_seed", args.adapt_seed)
+        append_arg(cmd, "adapt_save_suffix", args.adapt_save_suffix)
+
     return cmd
 
 
@@ -124,6 +158,22 @@ def choose_row(rows):
         print(f"Please choose a number between 1 and {len(rows)}.")
 
 
+def ask_adaptation(args):
+    prompt = (
+        "Enable target clean adaptation? [y/N] "
+        f"(epochs={args.adapt_epochs}, lr={args.adapt_lr}, batch={args.adapt_batch_size}, "
+        f"subset={args.adapt_subset_ratio}, val_ratio={args.adapt_val_ratio}): "
+    )
+    choice = input(prompt).strip().lower()
+    if choice in {"y", "yes"}:
+        args.adapt_target_clean = True
+    elif choice in {"n", "no", ""}:
+        args.adapt_target_clean = False
+    else:
+        print("Unrecognized choice, using default: no adaptation.")
+        args.adapt_target_clean = False
+
+
 def main():
     args = parse_args()
     rows = read_latest_rows(args.csv)
@@ -145,12 +195,13 @@ def main():
         row = rows[args.index - 1]
     else:
         row = choose_row(rows)
+        ask_adaptation(args)
 
     checkpoint_path = row.get("checkpoint_path", "")
     if checkpoint_path and not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
 
-    cmd = build_test_command(row)
+    cmd = build_test_command(row, args)
     print("Running test command:")
     print(" ".join(cmd))
     subprocess.run(cmd, check=True)

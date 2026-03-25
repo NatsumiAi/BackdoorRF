@@ -58,11 +58,16 @@ def get_dataset(category):
         x_test_t, y_test_t = np.load(os.path.join(run2_dir, 'x_test_2ft.npy')), np.load(os.path.join(run2_dir, 'y_test_2ft.npy'))
         x_test_t, y_test_t = np.squeeze(x_test_t), np.squeeze(y_test_t)
 
+        # Clean target-domain adaptation data
+        x_adapt_t, y_adapt_t = np.load(os.path.join(run2_dir, 'x_train_2ft.npy')), np.load(os.path.join(run2_dir, 'y_train_2ft.npy'))
+        x_adapt_t, y_adapt_t = np.squeeze(x_adapt_t), np.squeeze(y_adapt_t)
+
         return {
             'train': (x_train, y_train),
             'val': (x_val, y_val),
             'test_s': (x_test_s, y_test_s),
-            'test_t': [(x_test_t, y_test_t)] 
+            'test_t': [(x_test_t, y_test_t)],
+            'adapt_t': [(x_adapt_t, y_adapt_t)],
         }
 
     elif category == 'WiSig':
@@ -82,6 +87,11 @@ def get_dataset(category):
             'train': (x_train, y_train),
             'val': (x_val, y_val),
             'test_s': (x_test_s, y_test_s),
+            'adapt_t': [
+                (x_test_t1, y_test_t1),
+                (x_test_t2, y_test_t2),
+                (x_test_t3, y_test_t3)
+            ],
             'test_t': [
                 (x_test_t1, y_test_t1),
                 (x_test_t2, y_test_t2),
