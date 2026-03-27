@@ -4,6 +4,7 @@ Dataset_WiSig/
 
 # Checkpoints
 weight/
+env_templates/
 
 # Logs
 log/
@@ -19,6 +20,7 @@ __pycache__/
 .venv/
 venv/
 env/
+plot_*.py
 
 # IDE
 .idea/
@@ -30,5 +32,4 @@ opencode.json
 
 # Docs
 *.pdf
-*.md
-!AGENTS.md
+AGENTS.md

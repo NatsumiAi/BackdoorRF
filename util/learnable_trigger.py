@@ -1,7 +1,6 @@
-import math
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _signal_rms_torch(x):
@@ -9,112 +8,88 @@ def _signal_rms_torch(x):
 
 
 class LearnableSparseTrigger(nn.Module):
-    def __init__(
-        self,
-        total_length=160,
-        num_segments=2,
-        freq=8.0,
-        amp=0.08,
-        iq_mode="quadrature",
-        adaptive_amp=True,
-        position_mode="hybrid",
-        global_shift=16,
-        hybrid_ratio=0.2,
-    ):
+    def __init__(self, total_length=256, amp=0.08, iq_mode="quadrature", adaptive_amp=True, position_mode="random", smooth_kernel=9):
         super().__init__()
-        self.total_length = int(total_length)
-        self.num_segments = max(1, int(num_segments))
-        self.seg_length = max(4, int(total_length) // self.num_segments)
+        self.total_length = max(4, int(total_length))
+        self.seg_length = self.total_length
         self.base_amp = float(amp)
         self.iq_mode = iq_mode
         self.adaptive_amp = adaptive_amp
         self.position_mode = position_mode
-        self.global_shift = int(global_shift)
-        self.hybrid_ratio = float(hybrid_ratio)
+        self.smooth_kernel = max(3, int(smooth_kernel))
+        if self.smooth_kernel % 2 == 0:
+            self.smooth_kernel += 1
 
-        t = torch.arange(self.seg_length, dtype=torch.float32)
-        phase = 2 * math.pi * float(freq) * t / max(self.seg_length, 1)
-        init_i = torch.sin(phase)
+        init_i = torch.randn(self.seg_length, dtype=torch.float32)
         if iq_mode == "quadrature":
-            init_q = torch.cos(phase)
+            init_q = torch.randn(self.seg_length, dtype=torch.float32)
         elif iq_mode == "mirror":
-            init_q = -init_i
+            init_q = -init_i.clone()
         else:
             init_q = init_i.clone()
 
         self.pattern_i = nn.Parameter(init_i)
         self.pattern_q = nn.Parameter(init_q)
-        self.segment_scale = nn.Parameter(torch.ones(self.num_segments, dtype=torch.float32))
 
-    def _anchor_positions(self, signal_len, device, dtype):
-        if self.num_segments == 1:
-            return torch.tensor([max(0.0, signal_len - self.seg_length)], device=device, dtype=dtype)
-        head = 0.1 * signal_len
-        tail = max(0.0, 0.78 * signal_len)
-        if self.num_segments == 2:
-            anchors = [0.45 * signal_len, tail]
-        else:
-            anchors = torch.linspace(head, tail, steps=self.num_segments, device=device, dtype=dtype)
-            return anchors
-        return torch.tensor(anchors, device=device, dtype=dtype)
+    def effective_pattern(self):
+        pattern = torch.stack([self.pattern_i, self.pattern_q], dim=0).unsqueeze(0)
+        pattern = F.avg_pool1d(pattern, kernel_size=self.smooth_kernel, stride=1, padding=self.smooth_kernel // 2)
+        pattern = pattern.squeeze(0)
+        pattern = pattern - pattern.mean(dim=1, keepdim=True)
+        rms = torch.sqrt(pattern.pow(2).mean() + 1e-8)
+        return (pattern / rms) * self.base_amp
+
+    def regularization_loss(self, lambda_energy=0.0, lambda_smooth=0.0):
+        pattern = self.effective_pattern()
+        reg = pattern.new_tensor(0.0)
+        if lambda_energy > 0.0:
+            reg = reg + lambda_energy * pattern.pow(2).mean()
+        if lambda_smooth > 0.0 and pattern.size(-1) > 1:
+            diff = pattern[:, 1:] - pattern[:, :-1]
+            reg = reg + lambda_smooth * diff.pow(2).mean()
+        return reg
 
     def _energy_positions(self, x):
-        batch, _, signal_len = x.shape
-        power = x.pow(2).sum(dim=1)
-        kernel = torch.ones(1, 1, self.seg_length, device=x.device, dtype=x.dtype) / max(self.seg_length, 1)
-        smooth = torch.nn.functional.conv1d(power.unsqueeze(1), kernel, padding=self.seg_length // 2).squeeze(1)
-        smooth = smooth[:, :signal_len]
-        valid = smooth[:, : max(1, signal_len - self.seg_length + 1)]
-        topk = max(1, valid.size(1) // 5)
-        high_idx = torch.topk(valid, k=topk, dim=1).indices
-        low_idx = torch.topk(-valid, k=topk, dim=1).indices
-        return high_idx, low_idx
+        kernel = torch.ones(1, 1, self.seg_length, device=x.device, dtype=x.dtype) / float(self.seg_length)
+        power = x.pow(2).sum(dim=1, keepdim=True)
+        smooth = F.conv1d(power, kernel, padding=self.seg_length // 2).squeeze(1)
+        smooth = smooth[:, : x.size(-1)]
+        return smooth[:, : max(1, x.size(-1) - self.seg_length + 1)]
 
-    def _sample_starts(self, x):
-        batch, _, signal_len = x.shape
+    def sample_starts(self, x, mode=None):
+        mode = mode or self.position_mode
+        batch_size, _, signal_len = x.shape
         max_start = max(signal_len - self.seg_length, 0)
-        anchor = self._anchor_positions(signal_len, x.device, x.dtype)
-        starts = anchor.unsqueeze(0).repeat(batch, 1)
-
-        if self.position_mode in {"energy_adaptive", "hybrid"}:
-            high_idx, low_idx = self._energy_positions(x)
-            energy_starts = []
-            for seg_idx in range(self.num_segments):
-                pool = high_idx if seg_idx % 2 == 0 else low_idx
-                rand_col = torch.randint(0, pool.size(1), (batch,), device=x.device)
-                energy_starts.append(pool[torch.arange(batch, device=x.device), rand_col].float())
-            energy_starts = torch.stack(energy_starts, dim=1)
-            if self.position_mode == "energy_adaptive":
-                starts = energy_starts
+        if max_start == 0:
+            return torch.zeros(batch_size, dtype=torch.long, device=x.device)
+        if mode == "fixed":
+            return torch.full((batch_size,), max_start // 2, dtype=torch.long, device=x.device)
+        if mode in {"high_energy", "low_energy"}:
+            energy = self._energy_positions(x)
+            topk = max(1, min(energy.size(1), energy.size(1) // 5))
+            if mode == "high_energy":
+                candidates = torch.topk(energy, k=topk, dim=1).indices
             else:
-                starts = (1.0 - self.hybrid_ratio) * starts + self.hybrid_ratio * energy_starts
+                candidates = torch.topk(-energy, k=topk, dim=1).indices
+            rand_col = torch.randint(0, candidates.size(1), (batch_size,), device=x.device)
+            return candidates[torch.arange(batch_size, device=x.device), rand_col]
+        return torch.randint(0, max_start + 1, (batch_size,), device=x.device)
 
-        if self.position_mode in {"random_shift", "energy_adaptive", "hybrid"} and self.global_shift > 0:
-            shift = torch.randint(-self.global_shift, self.global_shift + 1, starts.shape, device=x.device)
-            starts = starts + shift.float()
-
-        starts = starts.round().clamp(0, max_start).long()
-        return starts
-
-    def forward(self, x):
+    def apply_with_starts(self, x, starts):
         x = x.clone()
-        batch, _, signal_len = x.shape
-        starts = self._sample_starts(x)
-
-        pat_i = torch.tanh(self.pattern_i).view(1, 1, -1)
-        pat_q = torch.tanh(self.pattern_q).view(1, 1, -1)
-        scales = torch.relu(self.segment_scale).view(1, self.num_segments, 1)
-        amp = x.new_full((batch, 1, 1), self.base_amp)
+        pattern = self.effective_pattern().view(1, 2, -1)
+        amp = x.new_ones((x.size(0), 1, 1))
         if self.adaptive_amp:
-            amp = amp * _signal_rms_torch(x)
+            amp = _signal_rms_torch(x)
 
-        for seg_idx in range(self.num_segments):
-            start = starts[:, seg_idx]
-            for sample_idx in range(batch):
-                s = int(start[sample_idx].item())
-                e = min(s + self.seg_length, signal_len)
-                seg_len = e - s
-                scale = (amp[sample_idx] * scales[0, seg_idx]).reshape(1)
-                x[sample_idx, 0, s:e] += scale * pat_i[0, 0, :seg_len]
-                x[sample_idx, 1, s:e] += scale * pat_q[0, 0, :seg_len]
+        for sample_idx in range(x.size(0)):
+            start = int(starts[sample_idx].item())
+            end = min(start + self.seg_length, x.size(-1))
+            seg_len = end - start
+            x[sample_idx, :, start:end] += amp[sample_idx] * pattern[0, :, :seg_len]
         return x
+
+    def forward(self, x, mode=None, starts=None):
+        if starts is None:
+            starts = self.sample_starts(x, mode=mode)
+        return self.apply_with_starts(x, starts)

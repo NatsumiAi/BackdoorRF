@@ -2,7 +2,6 @@ import os
 import pickle
 import numpy as np
 from sklearn.model_selection import train_test_split
-from collections import namedtuple
 
 BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 
@@ -35,10 +34,7 @@ def load_dataset_from_file(file_path, num_device, num_samples_per_transmitter=10
     return x, y
 
 def get_dataset(category):
-    """
-    Load datasets for specified categories, either 'ORACLE' or 'WiSig'.
-    Returns a structured dictionary or named tuple for organized access.
-    """
+    """Load the ORACLE or WiSig dataset splits used by the paper-style pipeline."""
 
     if category == 'ORACLE':
         dataset_dir = os.path.join(BASE_DIR, 'Dataset_ORALCE')
@@ -101,23 +97,3 @@ def get_dataset(category):
 
     else:
         raise ValueError(f"Unsupported category: {category}")
-
-if __name__ == "__main__":
-    """
-    Main block to test the get_dataset functionality.
-    """
-    for category in ['ORCALE', 'WiSig']:
-        print(f"Testing {category} dataset...")
-        dataset = get_dataset(category)
-
-        # Train and validation data
-        print(f"Train data shape: {dataset['train'][0].shape}, Labels: {len(dataset['train'][1])}")
-        print(f"Validation data shape: {dataset['val'][0].shape}, Labels: {len(dataset['val'][1])}")
-
-        # Test source data
-        print(f"Source test data shape: {dataset['test_source'][0].shape}, Labels: {len(dataset['test_source'][1])}")
-
-        # Test target data
-        print("Target test data shapes:")
-        for i, (x_test, y_test) in enumerate(dataset['test_target']):
-            print(f"  Target test {i + 1} shape: {x_test.shape}, Labels: {len(y_test)}")

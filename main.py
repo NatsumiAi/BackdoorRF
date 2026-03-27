@@ -1,49 +1,49 @@
-import os
 import argparse
 import hashlib
 import inspect
-import time
-import torch
-import numpy as np
-import random
 import math
-from torch.utils.data import DataLoader, TensorDataset
-from torchvision import transforms
-from torch.amp import autocast, GradScaler
+import os
+import random
+import time
+
+import numpy as np
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from util.get_dataset import get_dataset
-from util.CNNmodel import *
-from util.augmentation import augmentations
-from util.channel_aug import apply_channel_perturbation
+from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader, TensorDataset
 from torchsummary import summary
-from util.con_losses import SupConLoss
-from util.backdoor import add_trigger, make_poisoned_eval_set, make_targeted_eval_subset
-from util.adaptation import adapt_on_target_clean, build_adaptation_save_path
+from torchvision import transforms
+
+from util.CNNmodel import MACNN
+from util.augmentation import augmentations
+from util.get_dataset import get_dataset
 from util.learnable_trigger import LearnableSparseTrigger
+from util.residual_prior import load_or_create_environment_template, environment_template_matching_loss
 from util.training_monitor import TrainingMonitor, format_eta
 
+
 def setup_seed(seed):
-     torch.manual_seed(seed)
-     torch.cuda.manual_seed_all(seed)
-     np.random.seed(seed)
-     random.seed(seed)
-     torch.backends.cudnn.deterministic = True
-     torch.backends.cudnn.benchmark = False
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 setup_seed(2023)
 
-def get_param_value(model_size: str) -> int:
-    """Returns the parameter value based on the input size: S, M, or L."""
-    model_size_mapping = {'S': 8, 'M': 16, 'L': 32}
-    if model_size in model_size_mapping:
-        return model_size_mapping[model_size]
-    else:
+
+def get_param_value(model_size):
+    mapping = {"S": 8, "M": 16, "L": 32}
+    if model_size not in mapping:
         raise ValueError(f"Invalid model_size: {model_size}. Use 'S', 'M', or 'L'.")
+    return mapping[model_size]
 
 
 def build_save_path(conf):
     os.makedirs("weight", exist_ok=True)
-
     tags = [
         f"Dataset={conf.dataset_name}",
         f"Model={conf.model_size}",
@@ -54,51 +54,41 @@ def build_save_path(conf):
         f"pw={int(conf.persistent_workers)}",
         f"pf={conf.prefetch_factor}",
         f"bm={int(conf.benchmark)}",
-        f"lam={','.join(map(str, conf.lambda_con))}",
         f"bd={int(conf.backdoor)}",
         f"target={conf.target_label}",
         f"pr={conf.poison_rate}",
-        f"tt={conf.trigger_type}",
         f"ta={conf.trigger_amp}",
         f"tl={conf.trigger_len}",
-        f"tp={conf.trigger_pos}",
-        f"tf={conf.trigger_freq}",
-        f"tseg={conf.trigger_segments}",
-        f"tj={conf.trigger_jitter}",
         f"tiq={conf.trigger_iq_mode}",
         f"tad={int(conf.trigger_adaptive_amp)}",
         f"tpm={conf.trigger_position_mode}",
-        f"tgs={conf.trigger_global_shift}",
-        f"thr={conf.trigger_hybrid_ratio}",
-        f"pca={int(conf.poison_channel_aug)}",
-        f"cph={conf.channel_phase_max_deg}",
-        f"cs={conf.channel_scale_min}-{conf.channel_scale_max}",
-        f"csh={conf.channel_shift_max}",
-        f"csnr={conf.channel_snr_db}",
-        f"ms={int(conf.use_mixstyle)}",
-        f"msp={conf.mixstyle_p}",
-        f"msa={conf.mixstyle_alpha}",
-        f"msl={conf.mixstyle_layers.replace(',', '-')}",
-        f"msm={conf.mixstyle_mode}",
-        f"sm={int(conf.semantic_mix)}",
-        f"smp={conf.semantic_mix_p}",
-        f"sma={conf.semantic_mix_alpha}",
-        f"ls={conf.lambda_sem}",
+        f"tsk={conf.trigger_smooth_kernel}",
         f"lp={conf.lambda_pos}",
-        f"ts={conf.trigger_stage}",
+        f"lte={conf.lambda_trigger_energy}",
+        f"lts={conf.lambda_trigger_smooth}",
+        f"etm={int(conf.environment_template_matching)}",
+        f"ltev={conf.lambda_trigger_env}",
+        f"etmode={conf.env_template_mode}",
+        f"ets={conf.env_template_seed}",
+        f"etlow={conf.env_low_freq_ratio}",
+        f"ethigh={conf.env_high_freq_ratio}",
+        f"etsk={conf.env_template_smooth_kernel}",
+        f"emm={conf.env_match_mode}",
+        f"efft={conf.env_n_fft}",
+        f"ehop={conf.env_hop_length}",
+        f"ewin={conf.env_win_length}",
     ]
-    long_name = "_".join(tags)
-    digest = hashlib.sha1(long_name.encode("utf-8")).hexdigest()[:10]
-    short_name = f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth"
-    return os.path.join("weight", short_name)
+    digest = hashlib.sha1("_".join(tags).encode("utf-8")).hexdigest()[:10]
+    return os.path.join("weight", f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth")
 
-def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Single-source Domain Generalization")
-    parser.add_argument("--dataset_name", type=str, default="ORACLE", choices=["ORACLE", "WiSig"])   
+
+def parse_args(args=None):
+    parser = argparse.ArgumentParser(description="Paper-style learnable RF backdoor training.")
+    parser.add_argument("--dataset_name", type=str, default="ORACLE", choices=["ORACLE", "WiSig"])
     parser.add_argument("--mode", type=str, default="test", choices=["train", "test", "train_test"])
     parser.add_argument("--checkpoint_path", type=str, default="")
-    parser.add_argument("--model_size", type=str, default="S")
+    parser.add_argument("--model_size", type=str, default="S", choices=["S", "M", "L"])
+    parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--test_batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -109,138 +99,71 @@ def parse_args():
     parser.add_argument("--tensorboard", action="store_true")
     parser.add_argument("--log_dir", type=str, default="log")
     parser.add_argument("--tb_dir", type=str, default="runs")
-    parser.add_argument("--adapt_target_clean", action="store_true")
-    parser.add_argument("--adapt_epochs", type=int, default=10)
-    parser.add_argument("--adapt_lr", type=float, default=1e-5)
-    parser.add_argument("--adapt_batch_size", type=int, default=0)
-    parser.add_argument("--adapt_wd", type=float, default=0.0)
-    parser.add_argument("--adapt_val_ratio", type=float, default=0.2)
-    parser.add_argument("--adapt_subset_ratio", type=float, default=1.0)
-    parser.add_argument("--adapt_seed", type=int, default=2023)
-    parser.add_argument("--adapt_save_suffix", type=str, default="_adapt")
-    parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--monitor_backdoor", action="store_true")
     parser.add_argument("--monitor_interval", type=int, default=5)
-    parser.add_argument("--monitor_subset", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--main_aug_depth", type=int, nargs='+', default=[2])
-    parser.add_argument("--aux_aug_depth", type=int, nargs='+', default=[1])
-    parser.add_argument("--lambda_con", type=float, nargs='+', default=[1.0, 100.0])
-    parser.add_argument("--wd", type=float, default=0)
+    parser.add_argument("--monitor_subset", type=int, default=1200)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--wd", type=float, default=0.0)
+    parser.add_argument("--main_aug_depth", type=int, nargs="+", default=[4])
+    parser.add_argument("--aux_aug_depth", type=int, nargs="+", default=[1])
     parser.add_argument("--cuda", type=str, default="0")
+    parser.add_argument("--amp", action="store_true")
     parser.add_argument("--backdoor", action="store_true")
     parser.add_argument("--target_label", type=int, default=0)
     parser.add_argument("--poison_rate", type=float, default=0.1)
-    # 后门攻击参数
-    parser.add_argument("--trigger_type", type=str, default="sine",
-                        choices=[
-                            "sine", "const", "impulse", "square",
-                            "sparse_sine", "sparse_const", "sparse_impulse", "sparse_square",
-                            "learnable_sparse"
-                        ])
-    parser.add_argument("--trigger_amp", type=float, default=0.05)
-    parser.add_argument("--trigger_len", type=int, default=64)
-    parser.add_argument("--trigger_pos", type=str, default="tail",
-                        choices=["head", "middle", "tail", "random"])
-    parser.add_argument("--trigger_freq", type=int, default=8)
-    parser.add_argument("--trigger_segments", type=int, default=3)
-    parser.add_argument("--trigger_anchor_positions", type=str, default="head,middle,tail")
-    parser.add_argument("--trigger_jitter", type=int, default=8)
-    parser.add_argument("--trigger_iq_mode", type=str, default="quadrature",
-                        choices=["quadrature", "mirror", "same"])
+
+    parser.add_argument("--trigger_amp", type=float, default=0.08)
+    parser.add_argument("--trigger_len", type=int, default=256)
+    parser.add_argument("--trigger_iq_mode", type=str, default="quadrature", choices=["quadrature", "mirror", "same"])
     parser.add_argument("--trigger_adaptive_amp", action="store_true")
-    parser.add_argument("--trigger_position_mode", type=str, default="fixed",
-                        choices=["fixed", "random_shift", "energy_adaptive", "hybrid"])
-    parser.add_argument("--trigger_global_shift", type=int, default=0)
-    parser.add_argument("--trigger_hybrid_ratio", type=float, default=0.25)
-    parser.add_argument("--poison_channel_aug", action="store_true")
-    parser.add_argument("--channel_phase_max_deg", type=float, default=15.0)
-    parser.add_argument("--channel_scale_min", type=float, default=0.9)
-    parser.add_argument("--channel_scale_max", type=float, default=1.1)
-    parser.add_argument("--channel_shift_max", type=int, default=4)
-    parser.add_argument("--channel_snr_db", type=float, default=25.0)
-    parser.add_argument("--use_mixstyle", action="store_true")
-    parser.add_argument("--mixstyle_p", type=float, default=0.5)
-    parser.add_argument("--mixstyle_alpha", type=float, default=0.1)
-    parser.add_argument("--mixstyle_layers", type=str, default="1,2")
-    parser.add_argument("--mixstyle_mode", type=str, default="random",
-                        choices=["random", "crossdomain"])
-    parser.add_argument("--semantic_mix", action="store_true")
-    parser.add_argument("--semantic_mix_p", type=float, default=0.5)
-    parser.add_argument("--semantic_mix_alpha", type=float, default=0.4)
-    parser.add_argument("--lambda_sem", type=float, default=0.5)
-    parser.add_argument("--lambda_pos", type=float, default=0.0)
-    parser.add_argument("--trigger_lr", type=float, default=1e-3)
+    parser.add_argument("--trigger_position_mode", type=str, default="random", choices=["fixed", "random", "high_energy", "low_energy"])
+    parser.add_argument("--trigger_smooth_kernel", type=int, default=9)
+    parser.add_argument("--trigger_lr", type=float, default=5e-4)
+    parser.add_argument("--lambda_pos", type=float, default=1.0)
+    parser.add_argument("--lambda_trigger_energy", type=float, default=1e-3)
+    parser.add_argument("--lambda_trigger_smooth", type=float, default=1e-3)
 
-    # trigger 什么时候加：pre/post augmentation or EOT sampling
-    parser.add_argument("--trigger_stage", type=str, default="post",
-                        choices=["pre", "post", "eot"])
-    parser.add_argument("--amp", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--environment_template_matching", action="store_true")
+    parser.add_argument("--lambda_trigger_env", type=float, default=0.1)
+    parser.add_argument("--env_template_mode", type=str, default="band_limited_noise", choices=["band_limited_noise"])
+    parser.add_argument("--env_template_path", type=str, default="")
+    parser.add_argument("--env_template_dir", type=str, default="env_templates")
+    parser.add_argument("--env_template_seed", type=int, default=2023)
+    parser.add_argument("--env_low_freq_ratio", type=float, default=0.05)
+    parser.add_argument("--env_high_freq_ratio", type=float, default=0.35)
+    parser.add_argument("--env_template_smooth_kernel", type=int, default=9)
+    parser.add_argument("--env_match_mode", type=str, default="spectrogram", choices=["spectrogram", "psd"])
+    parser.add_argument("--env_n_fft", type=int, default=32)
+    parser.add_argument("--env_hop_length", type=int, default=8)
+    parser.add_argument("--env_win_length", type=int, default=32)
+    return parser.parse_args(args)
 
 
-def parse_layer_spec(layer_spec):
-    layers = []
-    for item in str(layer_spec).split(","):
-        item = item.strip()
-        if not item:
-            continue
-        layers.append(int(item))
-    return layers
+def position_consistency_loss(embedding_a, embedding_b):
+    if embedding_a.numel() == 0 or embedding_b.numel() == 0:
+        return embedding_a.new_tensor(0.0)
+    ref = F.normalize(embedding_a, dim=1)
+    cur = F.normalize(embedding_b, dim=1)
+    return F.mse_loss(cur, ref)
 
 
-def soft_cross_entropy(logits, soft_targets):
-    log_prob = F.log_softmax(logits, dim=1)
-    return -(soft_targets * log_prob).sum(dim=1).mean()
+def set_module_trainable(module, enabled):
+    if module is None:
+        return
+    for param in module.parameters():
+        param.requires_grad_(enabled)
 
 
-def position_consistency_loss(embedding_list, poison_mask):
-    if poison_mask is None or not torch.any(poison_mask) or len(embedding_list) < 2:
-        device = embedding_list[-1].device if embedding_list else poison_mask.device
-        return torch.tensor(0.0, device=device)
-
-    ref = F.normalize(embedding_list[-1][poison_mask], dim=1)
-    losses = []
-    for view_embedding in embedding_list[:-1]:
-        cur = F.normalize(view_embedding[poison_mask], dim=1)
-        losses.append(F.mse_loss(cur, ref))
-
-    if not losses:
-        return torch.tensor(0.0, device=ref.device)
-    return torch.stack(losses).mean()
-
-
-def semantic_mixup(embeddings, labels, num_classes, alpha=0.4, prob=0.5):
-    if alpha <= 0.0 or prob <= 0.0 or embeddings.size(0) < 2:
-        return None
-
-    if random.random() > prob:
-        return None
-
-    beta_dist = torch.distributions.Beta(alpha, alpha)
-    lam = beta_dist.sample((embeddings.size(0), 1)).to(embeddings.device)
-    perm = torch.randperm(embeddings.size(0), device=embeddings.device)
-
-    mixed_embeddings = F.normalize(lam * embeddings + (1.0 - lam) * embeddings[perm], dim=1)
-    one_hot = F.one_hot(labels, num_classes=num_classes).float()
-    mixed_targets = lam * one_hot + (1.0 - lam) * one_hot[perm]
-    return mixed_embeddings, mixed_targets
-
-
-def is_learnable_trigger(conf_or_cfg):
-    trigger_type = getattr(conf_or_cfg, "trigger_type", None)
-    if trigger_type is None and isinstance(conf_or_cfg, dict):
-        trigger_type = conf_or_cfg.get("trigger_type", "")
-    return trigger_type == "learnable_sparse"
-
-
-def apply_learnable_trigger_to_views(data_views, poison_flag, trigger_module):
+def apply_trigger_to_views(data_views, poison_flag, trigger_module, mode="random", detach_trigger=False):
     if trigger_module is None or not torch.any(poison_flag):
         return data_views
     patched = []
     for view in data_views:
         view = view.clone()
-        view[poison_flag] = trigger_module(view[poison_flag])
+        poisoned_view = trigger_module(view[poison_flag], mode=mode)
+        if detach_trigger:
+            poisoned_view = poisoned_view.detach()
+        view[poison_flag] = poisoned_view
         patched.append(view)
     return patched
 
@@ -254,63 +177,14 @@ def sample_eval_subset(x, y, max_count, seed):
     return x[indices], y[indices]
 
 
-def monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, trigger_cfg, epoch, trigger_module=None):
-    if not conf.backdoor:
-        return {}
-
-    source_x, source_y = sample_eval_subset(
-        dataset['test_s'][0],
-        dataset['test_s'][1],
-        conf.monitor_subset,
-        2023 + epoch,
-    )
-    if trigger_module is not None:
-        x_bd_s, y_bd_s = make_targeted_eval_subset(source_x, source_y, conf.target_label)
-    else:
-        x_bd_s, y_bd_s = make_poisoned_eval_set(source_x, source_y, conf.target_label, trigger_cfg)
-    source_loader = DataLoader(
-        TensorDataset(torch.Tensor(x_bd_s), torch.Tensor(y_bd_s)),
-        batch_size=conf.test_batch_size,
-        shuffle=False,
-        **eval_loader_kwargs,
-    )
-    monitor_source_asr = test(model, source_loader, desc="Monitor Source ASR", trigger_module=trigger_module, apply_trigger=trigger_module is not None)
-
-    target_metrics = []
-    for idx, (x_t, y_t) in enumerate(dataset['test_t']):
-        x_t, y_t = sample_eval_subset(x_t, y_t, conf.monitor_subset, 4023 + epoch + idx)
-        if trigger_module is not None:
-            x_bd_t, y_bd_t = make_targeted_eval_subset(x_t, y_t, conf.target_label)
-        else:
-            x_bd_t, y_bd_t = make_poisoned_eval_set(x_t, y_t, conf.target_label, trigger_cfg)
-        target_loader = DataLoader(
-            TensorDataset(torch.Tensor(x_bd_t), torch.Tensor(y_bd_t)),
-            batch_size=conf.test_batch_size,
-            shuffle=False,
-            **eval_loader_kwargs,
-        )
-        target_metrics.append(test(model, target_loader, desc=f"Monitor Target ASR #{idx + 1}", trigger_module=trigger_module, apply_trigger=trigger_module is not None))
-
-    result = {
-        "monitor_source_asr": monitor_source_asr,
-        "monitor_target_asr_mean": float(np.mean(target_metrics)) if target_metrics else math.nan,
-    }
-    if target_metrics:
-        result["monitor_asr_gap"] = monitor_source_asr - result["monitor_target_asr_mean"]
-    return result
+def make_targeted_eval_subset(x, y, target_label):
+    x = np.asarray(x)
+    y = np.asarray(y)
+    mask = y != int(target_label)
+    return x[mask], np.full(int(mask.sum()), int(target_label), dtype=y.dtype)
 
 
-def get_target_adaptation_data(dataset, target_index=0):
-    adapt_sets = dataset.get('adapt_t')
-    if adapt_sets:
-        return adapt_sets[target_index]
-    return dataset['test_t'][target_index]
-
-
-def save_training_checkpoint(save_path, model, trigger_module=None):
-    if trigger_module is None:
-        torch.save(model.state_dict(), save_path)
-        return
+def save_training_checkpoint(save_path, model, trigger_module):
     payload = {
         "model": model.state_dict(),
         "learnable_trigger": trigger_module.state_dict(),
@@ -318,103 +192,43 @@ def save_training_checkpoint(save_path, model, trigger_module=None):
     torch.save(payload, save_path)
 
 
-def load_training_checkpoint(load_path, model, trigger_module=None):
+def load_training_checkpoint(load_path, model, trigger_module):
     payload = torch.load(load_path, map_location="cpu")
-    if isinstance(payload, dict) and "model" in payload:
-        model.load_state_dict(payload["model"])
-        if trigger_module is not None and "learnable_trigger" in payload:
-            trigger_module.load_state_dict(payload["learnable_trigger"])
-    else:
-        model.load_state_dict(payload)
+    if not isinstance(payload, dict) or "model" not in payload:
+        raise ValueError("Checkpoint format is incompatible with the current paper-style workflow.")
+    model.load_state_dict(payload["model"])
+    missing, unexpected = trigger_module.load_state_dict(payload.get("learnable_trigger", {}), strict=False)
+    if missing or unexpected:
+        print(f"[Warning] Learnable trigger checkpoint mismatch | missing={missing} | unexpected={unexpected}")
 
 
-def _sample_augmented_view(base, preprocess, aug_depth, aug_list,
-                           poison=False, trigger_cfg=None, channel_cfg=None,
-                           trigger_stage="post"):
-    iq_data_aug = np.array(base, dtype=np.float32, copy=True)
-
-    if poison and trigger_cfg is not None and not is_learnable_trigger(trigger_cfg) and trigger_stage == "eot":
-        iq_data_aug = add_trigger(iq_data_aug, **trigger_cfg)
-        if channel_cfg is not None:
-            iq_data_aug = apply_channel_perturbation(iq_data_aug, **channel_cfg)
-
-    if aug_depth != 0:
-        sampled_ops = np.random.choice(aug_list, aug_depth)
-        for op in sampled_ops:
-            iq_data_aug = op(iq_data_aug)
-
-    if poison and trigger_cfg is not None and not is_learnable_trigger(trigger_cfg) and trigger_stage == "post":
-        iq_data_aug = add_trigger(iq_data_aug, **trigger_cfg)
-        if channel_cfg is not None:
-            iq_data_aug = apply_channel_perturbation(iq_data_aug, **channel_cfg)
-
-    iq_data_aug = np.squeeze(preprocess(iq_data_aug.astype(np.float32)))
-    return iq_data_aug
-
-
-def aug(iq_data, preprocess, main_aug_depth, aux_aug_depth,
-        poison=False, trigger_cfg=None, channel_cfg=None, trigger_stage="post"):
-    aug_list = augmentations
-    iq_data_aug_list = []
-
+def sample_augmented_views(iq_data, preprocess, main_aug_depth, aux_aug_depth):
     base = np.array(iq_data, dtype=np.float32, copy=True)
+    views = []
+    for aug_depth in aux_aug_depth:
+        view = np.array(base, dtype=np.float32, copy=True)
+        if aug_depth > 0:
+            for op in np.random.choice(augmentations, aug_depth):
+                view = op(view)
+        views.append(np.squeeze(preprocess(view.astype(np.float32))))
 
-    # 先加 trigger，再增强
-    if poison and trigger_cfg is not None and not is_learnable_trigger(trigger_cfg) and trigger_stage == "pre":
-        base = add_trigger(base, **trigger_cfg)
-        if channel_cfg is not None:
-            base = apply_channel_perturbation(base, **channel_cfg)
+    main_view = np.array(base, dtype=np.float32, copy=True)
+    if main_aug_depth[0] > 0:
+        for op in np.random.choice(augmentations, main_aug_depth[0]):
+            main_view = op(main_view)
+    views.append(np.squeeze(preprocess(main_view.astype(np.float32))))
+    return views
 
-    # aux views
-    for i in range(len(aux_aug_depth)):
-        view_base = iq_data if trigger_stage == "eot" else base
-        iq_data_aug = _sample_augmented_view(
-            view_base,
-            preprocess,
-            aux_aug_depth[i],
-            aug_list,
-            poison=poison,
-            trigger_cfg=trigger_cfg,
-            channel_cfg=channel_cfg,
-            trigger_stage=trigger_stage,
-        )
-        iq_data_aug_list.append(iq_data_aug)
-
-    # main view
-    view_base = iq_data if trigger_stage == "eot" else base
-    iq_data_aug = _sample_augmented_view(
-        view_base,
-        preprocess,
-        main_aug_depth[0],
-        aug_list,
-        poison=poison,
-        trigger_cfg=trigger_cfg,
-        channel_cfg=channel_cfg,
-        trigger_stage=trigger_stage,
-    )
-    iq_data_aug_list.append(iq_data_aug)
-
-    return iq_data_aug_list
 
 class AugDataset(torch.utils.data.Dataset):
-    def __init__(self, x_train, y_train, preprocess, main_aug_depth, aux_aug_depth,
-                 backdoor=False, target_label=0, poison_rate=0.0,
-                 trigger_cfg=None, channel_cfg=None, trigger_stage="post"):
-        self.dataset = []
-        for i in range(np.shape(x_train)[0]):
-            self.dataset.append((np.squeeze(x_train[i, :, :]), int(y_train[i])))
-
+    def __init__(self, x_train, y_train, preprocess, main_aug_depth, aux_aug_depth, backdoor=False, target_label=0, poison_rate=0.0):
+        self.dataset = [(np.squeeze(x_train[i, :, :]), int(y_train[i])) for i in range(np.shape(x_train)[0])]
         self.preprocess = preprocess
         self.main_aug_depth = main_aug_depth
         self.aux_aug_depth = aux_aug_depth
-
         self.backdoor = backdoor
         self.target_label = target_label
         self.poison_rate = poison_rate
-        self.trigger_cfg = trigger_cfg
-        self.channel_cfg = channel_cfg
-        self.trigger_stage = trigger_stage
-
         self.poison_mask = np.zeros(len(self.dataset), dtype=bool)
 
         if self.backdoor and self.poison_rate > 0:
@@ -423,118 +237,143 @@ class AugDataset(torch.utils.data.Dataset):
             num_poison = int(len(candidate_idx) * self.poison_rate)
             poison_idx = np.random.choice(candidate_idx, num_poison, replace=False)
             self.poison_mask[poison_idx] = True
-
             print(f"[Backdoor] poison samples: {num_poison}/{len(candidate_idx)}")
             print(f"[Backdoor] target label: {self.target_label}")
 
     def __getitem__(self, idx):
         x, y = self.dataset[idx]
-        poison = self.backdoor and self.poison_mask[idx]
-
-        if poison:
-            y = self.target_label
-
-        x_aug = aug(
-            x, self.preprocess,
-            self.main_aug_depth, self.aux_aug_depth,
-            poison=poison,
-            trigger_cfg=self.trigger_cfg,
-            channel_cfg=self.channel_cfg,
-            trigger_stage=self.trigger_stage
-        )
-        return x_aug, y, int(poison)
+        x_aug = sample_augmented_views(x, self.preprocess, self.main_aug_depth, self.aux_aug_depth)
+        return x_aug, y, int(self.poison_mask[idx])
 
     def __len__(self):
         return len(self.dataset)
 
-def train(model, loss, train_dataloader, optimizer, scaler, epoch, conf, trigger_module=None, trigger_optimizer=None):
+
+def masked_nll_loss(log_prob, labels, mask):
+    if mask is None or not torch.any(mask):
+        return log_prob.new_tensor(0.0)
+    return F.nll_loss(log_prob[mask], labels[mask])
+
+
+def mean_poison_loss(log_prob, target_label, poison_mask):
+    if poison_mask is None or not torch.any(poison_mask):
+        return log_prob.new_tensor(0.0)
+    poison_targets = torch.full((int(poison_mask.sum().item()),), int(target_label), dtype=torch.long, device=log_prob.device)
+    return F.nll_loss(log_prob[poison_mask], poison_targets)
+
+
+def mean_poison_view_loss(prob_list, target_label, poison_mask):
+    if poison_mask is None or not torch.any(poison_mask):
+        return prob_list[-1].new_tensor(0.0)
+    losses = [mean_poison_loss(log_prob, target_label, poison_mask) for log_prob in prob_list]
+    return torch.stack(losses).mean()
+
+
+def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_module, trigger_optimizer, env_template=None):
     model.train()
-    if trigger_module is not None:
-        trigger_module.train()
+    trigger_module.train()
     correct = 0
-    all_loss = 0
-    for data_nn in train_dataloader:
-        data, target, poison_flag = data_nn
+    correct_total = 0
+    all_loss = 0.0
+
+    for data, target, poison_flag in train_dataloader:
         target = target.long()
         poison_flag = poison_flag.bool()
-        domain_target = []
-        target_all = []
-        num_data= len(conf.main_aug_depth) + len(conf.aux_aug_depth)
-        for i in range(num_data):
-            domain_target.append(i*torch.ones(data[0].size(0)).long())   
-            target_all.append(target)   
 
         if torch.cuda.is_available():
             data = [view.cuda() for view in data]
             target = target.cuda()
             poison_flag = poison_flag.cuda()
-            target_all = torch.cat(target_all, 0).cuda()
-            domain_target= torch.cat(domain_target, 0).cuda()
-        data = apply_learnable_trigger_to_views(data, poison_flag, trigger_module)
-        data_all = torch.cat(data, 0)
-        # AMP加速
-        optimizer.zero_grad(set_to_none=True)
-        if trigger_optimizer is not None:
+
+        clean_mask = ~poison_flag
+        num_views = len(data)
+
+        if torch.any(poison_flag):
+            set_module_trainable(model, False)
+            set_module_trainable(trigger_module, True)
+            model.eval()
+            trigger_module.train()
             trigger_optimizer.zero_grad(set_to_none=True)
 
-        with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
-            embedding, output = model(data_all)
-            prob = F.log_softmax(output, dim=1)
-            porb_list = torch.split(prob, data[0].size(0))
-            embedding_list = torch.split(embedding, data[0].size(0))
-            cls_loss = loss[0](porb_list[num_data - 1], target)
-            con_loss = loss[1](embedding.unsqueeze(1), target_all, adv=False)
-            adv_con_loss = loss[1](embedding.unsqueeze(1), domain_target, adv=True)
-            sem_loss = torch.tensor(0.0, device=embedding.device)
-            pos_loss = position_consistency_loss(embedding_list, poison_flag)
+            trigger_view = data[-1]
+            with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
+                random_view = trigger_view.clone()
+                high_view = trigger_view.clone()
+                low_view = trigger_view.clone()
+                random_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="random")
+                high_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="high_energy")
+                low_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="low_energy")
 
-            if conf.semantic_mix:
-                sem_pack = semantic_mixup(
-                    embedding_list[num_data - 1],
-                    target,
-                    num_classes=conf.num_classes,
-                    alpha=conf.semantic_mix_alpha,
-                    prob=conf.semantic_mix_p,
+                random_embedding, random_output = model(random_view)
+                high_embedding, _ = model(high_view)
+                low_embedding, _ = model(low_view)
+
+                random_log_prob = F.log_softmax(random_output, dim=1)
+                trigger_loss = mean_poison_loss(random_log_prob, conf.target_label, poison_flag)
+                trigger_loss = trigger_loss + conf.lambda_pos * position_consistency_loss(high_embedding[poison_flag], low_embedding[poison_flag])
+                trigger_loss = trigger_loss + trigger_module.regularization_loss(
+                    lambda_energy=conf.lambda_trigger_energy,
+                    lambda_smooth=conf.lambda_trigger_smooth,
                 )
-                if sem_pack is not None:
-                    mixed_embeddings, mixed_targets = sem_pack
-                    mixed_logits = model.classify_embedding(mixed_embeddings)
-                    sem_loss = soft_cross_entropy(mixed_logits, mixed_targets)
+                if conf.environment_template_matching and conf.lambda_trigger_env > 0.0:
+                    env_loss = environment_template_matching_loss(
+                        trigger_module.effective_pattern(),
+                        env_template,
+                        match_mode=conf.env_match_mode,
+                        n_fft=conf.env_n_fft,
+                        hop_length=conf.env_hop_length,
+                        win_length=conf.env_win_length,
+                    )
+                    trigger_loss = trigger_loss + conf.lambda_trigger_env * env_loss
 
-            result_loss = (
-                cls_loss
-                + conf.lambda_con[0] * con_loss
-                + conf.lambda_con[1] * adv_con_loss
-                + conf.lambda_sem * sem_loss
-                + conf.lambda_pos * pos_loss
-            )
+            scaler.scale(trigger_loss).backward()
+            scaler.step(trigger_optimizer)
+            scaler.update()
+
+        set_module_trainable(model, True)
+        set_module_trainable(trigger_module, False)
+        model.train()
+        trigger_module.eval()
+        optimizer.zero_grad(set_to_none=True)
+
+        poisoned_views = apply_trigger_to_views(data, poison_flag, trigger_module, mode="random", detach_trigger=True)
+        data_all = torch.cat(poisoned_views, dim=0)
+        with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
+            _, output = model(data_all)
+            prob = F.log_softmax(output, dim=1)
+            prob_list = torch.split(prob, data[0].size(0))
+            clean_cls_loss = masked_nll_loss(prob_list[-1], target, clean_mask)
+            poison_cls_loss = mean_poison_view_loss(prob_list, conf.target_label, poison_flag)
+            result_loss = clean_cls_loss + poison_cls_loss
 
         scaler.scale(result_loss).backward()
         scaler.step(optimizer)
-        if trigger_optimizer is not None:
-            has_trigger_grad = any(param.grad is not None for param in trigger_module.parameters())
-            if has_trigger_grad:
-                scaler.unscale_(trigger_optimizer)
-                trigger_optimizer.step()
         scaler.update()
-        # -------------
+        set_module_trainable(trigger_module, True)
+        trigger_module.train()
+
         batch_size = data[0].size(0)
-        all_loss += result_loss.item()*batch_size
-        pred = porb_list[num_data -  1].argmax(dim=1, keepdim=True)
-        correct += pred.eq(target.view_as(pred)).sum().item()
+        all_loss += result_loss.item() * batch_size
+        pred = prob_list[-1].argmax(dim=1, keepdim=True)
+        if torch.any(clean_mask):
+            correct += pred[clean_mask].eq(target[clean_mask].view_as(pred[clean_mask])).sum().item()
+            correct_total += int(clean_mask.sum().item())
 
-    print('Train Epoch: {} \tLoss: {:.6f}, Accuracy: {}/{} ({:0f}%)\n'.format(
-        epoch,
-        all_loss / len(train_dataloader.dataset),
-        correct,
-        len(train_dataloader.dataset),
-        100.0 * correct / len(train_dataloader.dataset))
+    print(
+        "Train Epoch: {} \tLoss: {:.6f}, Accuracy: {}/{} ({:0f}%)\n".format(
+            epoch,
+            all_loss / len(train_dataloader.dataset),
+            correct,
+            max(correct_total, 1),
+            100.0 * correct / max(correct_total, 1),
+        )
     )
-    return all_loss / len(train_dataloader.dataset), correct / len(train_dataloader.dataset)
+    return all_loss / len(train_dataloader.dataset), correct / max(correct_total, 1)
 
-def evaluate(model, loss, test_dataloader, epoch):
+
+def evaluate(model, loss_fn, test_dataloader):
     model.eval()
-    test_loss = 0
+    test_loss = 0.0
     correct = 0
     with torch.no_grad():
         for data, target in test_dataloader:
@@ -542,24 +381,23 @@ def evaluate(model, loss, test_dataloader, epoch):
             if torch.cuda.is_available():
                 data = data.cuda()
                 target = target.cuda()
-            embedding, output = model(data)
-            output = F.log_softmax(output, dim=1)
-            test_loss += loss[0](output, target).item()*data.size(0)
-            pred = output.argmax(dim=1, keepdim=True)
+            _, output = model(data)
+            log_prob = F.log_softmax(output, dim=1)
+            test_loss += loss_fn(log_prob, target).item() * data.size(0)
+            pred = log_prob.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_dataloader.dataset)
-    fmt = '\nValidation set: Loss: {:.4f}, Accuracy: {}/{} ({:0f}%)\n'
     print(
-        fmt.format(
+        "\nValidation set: Loss: {:.4f}, Accuracy: {}/{} ({:0f}%)\n".format(
             test_loss,
             correct,
             len(test_dataloader.dataset),
             100.0 * correct / len(test_dataloader.dataset),
         )
     )
-
     return test_loss, correct / len(test_dataloader.dataset)
+
 
 def test(model, test_dataloader, desc="Test", target_label=None, trigger_module=None, apply_trigger=False):
     model.eval()
@@ -574,8 +412,8 @@ def test(model, test_dataloader, desc="Test", target_label=None, trigger_module=
                 data = data.cuda()
                 target = target.cuda()
             if apply_trigger and trigger_module is not None:
-                data = trigger_module(data)
-            embedding, output = model(data)
+                data = trigger_module(data, mode="random")
+            _, output = model(data)
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
             if target_label is not None:
@@ -591,91 +429,126 @@ def test(model, test_dataloader, desc="Test", target_label=None, trigger_module=
     return acc
 
 
-def train_and_evaluate(model, loss, train_loader, val_loader, optimizer, scaler, epochs, save_path, conf,
-                       dataset=None, eval_loader_kwargs=None, trigger_cfg=None,
-                       trigger_module=None, trigger_optimizer=None):
-    """Train and evaluate the model, saving the best model."""
-    best_loss = float('inf')
-    conf.best_val_loss = best_loss
-    model.best_val_loss = best_loss
-    monitor = TrainingMonitor(
-        save_path,
-        use_tensorboard=conf.tensorboard,
-        log_dir=conf.log_dir,
-        tb_root=conf.tb_dir,
-    )
+def monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, epoch, trigger_module):
+    if not conf.backdoor:
+        return {}
+
+    source_x, source_y = sample_eval_subset(dataset["test_s"][0], dataset["test_s"][1], conf.monitor_subset, 2023 + epoch)
+    x_bd_s, y_bd_s = make_targeted_eval_subset(source_x, source_y, conf.target_label)
+    source_loader = DataLoader(TensorDataset(torch.Tensor(x_bd_s), torch.Tensor(y_bd_s)), batch_size=conf.test_batch_size, shuffle=False, **eval_loader_kwargs)
+    monitor_source_asr = test(model, source_loader, desc="Monitor Source ASR", trigger_module=trigger_module, apply_trigger=True)
+
+    target_metrics = []
+    for idx, (x_t, y_t) in enumerate(dataset["test_t"]):
+        x_t, y_t = sample_eval_subset(x_t, y_t, conf.monitor_subset, 4023 + epoch + idx)
+        x_bd_t, y_bd_t = make_targeted_eval_subset(x_t, y_t, conf.target_label)
+        target_loader = DataLoader(TensorDataset(torch.Tensor(x_bd_t), torch.Tensor(y_bd_t)), batch_size=conf.test_batch_size, shuffle=False, **eval_loader_kwargs)
+        target_metrics.append(test(model, target_loader, desc=f"Monitor Target ASR #{idx + 1}", trigger_module=trigger_module, apply_trigger=True))
+
+    result = {
+        "monitor_source_asr": monitor_source_asr,
+        "monitor_target_asr_mean": float(np.mean(target_metrics)) if target_metrics else math.nan,
+    }
+    if target_metrics:
+        result["monitor_asr_gap"] = monitor_source_asr - result["monitor_target_asr_mean"]
+    return result
+
+
+def train_and_evaluate(model, loss_fn, train_loader, val_loader, optimizer, scaler, epochs, save_path, conf, dataset, eval_loader_kwargs, trigger_module, trigger_optimizer, env_template):
+    best_loss = float("inf")
+    monitor = TrainingMonitor(save_path, use_tensorboard=conf.tensorboard, log_dir=conf.log_dir, tb_root=conf.tb_dir)
     train_start = time.perf_counter()
     try:
         for epoch in range(1, epochs + 1):
             epoch_start = time.perf_counter()
             train_loss, train_acc = train(
                 model,
-                loss,
                 train_loader,
                 optimizer,
                 scaler,
                 epoch,
                 conf,
-                trigger_module=trigger_module,
-                trigger_optimizer=trigger_optimizer,
+                trigger_module,
+                trigger_optimizer,
+                env_template=env_template,
             )
-            val_loss, val_acc = evaluate(model, loss, val_loader, epoch)
+            val_loss, val_acc = evaluate(model, loss_fn, val_loader)
             if val_loss < best_loss:
                 print(f"Saving model at epoch {epoch} with loss {val_loss:.4f}")
                 best_loss = val_loss
-                conf.best_val_loss = best_loss
-                model.best_val_loss = best_loss
-                save_training_checkpoint(save_path, model, trigger_module=trigger_module)
-            else:
-                conf.best_val_loss = best_loss
-                model.best_val_loss = best_loss
+                save_training_checkpoint(save_path, model, trigger_module)
 
             epoch_time = time.perf_counter() - epoch_start
             elapsed = time.perf_counter() - train_start
-            avg_epoch_time = elapsed / epoch
-            eta_seconds = avg_epoch_time * max(epochs - epoch, 0)
-            current_lr = optimizer.param_groups[0]["lr"]
+            eta_seconds = (elapsed / max(epoch, 1)) * max(epochs - epoch, 0)
             row = {
                 "epoch": epoch,
+                "stage": "joint_paper",
                 "train_loss": train_loss,
                 "train_acc": train_acc,
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "best_val_loss": best_loss,
-                "lr": current_lr,
+                "lr": optimizer.param_groups[0]["lr"],
                 "epoch_time": epoch_time,
                 "eta_minutes": eta_seconds / 60.0,
             }
-
-            if (
-                conf.monitor_backdoor
-                and dataset is not None
-                and eval_loader_kwargs is not None
-                and trigger_cfg is not None
-                and epoch % max(conf.monitor_interval, 1) == 0
-            ):
-                row.update(monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, trigger_cfg, epoch, trigger_module=trigger_module))
-
+            if conf.monitor_backdoor and epoch % max(conf.monitor_interval, 1) == 0:
+                row.update(monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, epoch, trigger_module))
             monitor.update(row)
 
             print(
                 f"Epoch {epoch:>3}/{epochs} | train_loss={train_loss:.4f} | train_acc={train_acc:.4f} "
                 f"| val_loss={val_loss:.4f} | val_acc={val_acc:.4f} | best_val={best_loss:.4f} "
-                f"| lr={current_lr:.2e} | epoch_time={epoch_time:.1f}s | eta={format_eta(eta_seconds)}"
+                f"| lr={optimizer.param_groups[0]['lr']:.2e} | epoch_time={epoch_time:.1f}s | eta={format_eta(eta_seconds)}"
             )
             if "monitor_source_asr" in row:
-                monitor_msg = (
+                print(
                     f"Backdoor monitor | source_asr={row['monitor_source_asr']:.4f} "
                     f"| target_asr_mean={row['monitor_target_asr_mean']:.4f} "
                     f"| asr_gap={row.get('monitor_asr_gap', math.nan):.4f}"
                 )
-                print(monitor_msg)
-            monitor_msg = f"Training monitor updated: {monitor.history_csv_path} | {monitor.history_plot_path}"
+            monitor_msg = f"Training monitor updated: {monitor.history_csv_path}"
             if monitor.tensorboard_dir is not None:
                 monitor_msg += f" | TensorBoard: {monitor.tensorboard_dir}"
             print(monitor_msg)
     finally:
         monitor.close()
+
+
+def build_loader_kwargs(conf):
+    train_loader_kwargs = {
+        "num_workers": conf.num_workers,
+        "pin_memory": conf.pin_memory,
+    }
+    if conf.num_workers > 0 and conf.persistent_workers:
+        train_loader_kwargs["persistent_workers"] = True
+    if conf.num_workers > 0 and "prefetch_factor" in inspect.signature(DataLoader.__init__).parameters:
+        train_loader_kwargs["prefetch_factor"] = conf.prefetch_factor
+
+    eval_loader_kwargs = {
+        "num_workers": 0 if os.name == "nt" else conf.num_workers,
+        "pin_memory": conf.pin_memory,
+    }
+    if eval_loader_kwargs["num_workers"] > 0 and "prefetch_factor" in inspect.signature(DataLoader.__init__).parameters:
+        eval_loader_kwargs["prefetch_factor"] = conf.prefetch_factor
+    return train_loader_kwargs, eval_loader_kwargs
+
+
+def build_model(conf, num_classes):
+    return MACNN(in_channels=2, channels=get_param_value(conf.model_size), num_classes=num_classes)
+
+
+def build_trigger(conf):
+    return LearnableSparseTrigger(
+        total_length=conf.trigger_len,
+        amp=conf.trigger_amp,
+        iq_mode=conf.trigger_iq_mode,
+        adaptive_amp=conf.trigger_adaptive_amp,
+        position_mode=conf.trigger_position_mode,
+        smooth_kernel=conf.trigger_smooth_kernel,
+    )
+
 
 def main():
     conf = parse_args()
@@ -685,130 +558,77 @@ def main():
 
     num_classes = 16 if conf.dataset_name == "ORACLE" else 6
     input_shape = (2, 6000) if conf.dataset_name == "ORACLE" else (2, 256)
-
     save_path = build_save_path(conf)
     load_path = conf.checkpoint_path or save_path
-    adapt_save_path = build_adaptation_save_path(save_path, suffix=conf.adapt_save_suffix)
     print(f"Checkpoint path: {save_path}")
     if conf.checkpoint_path:
         print(f"Checkpoint override for loading: {conf.checkpoint_path}")
     if conf.tensorboard:
         print(f"TensorBoard root: {conf.tb_dir}")
 
-    trigger_cfg = {
-        "trigger_type": conf.trigger_type,
-        "amp": conf.trigger_amp,
-        "length": conf.trigger_len,
-        "pos": conf.trigger_pos,
-        "freq": conf.trigger_freq,
-        "num_segments": conf.trigger_segments,
-        "anchors": conf.trigger_anchor_positions,
-        "jitter": conf.trigger_jitter,
-        "adaptive_amp": conf.trigger_adaptive_amp,
-        "iq_mode": conf.trigger_iq_mode,
-        "position_mode": conf.trigger_position_mode,
-        "global_shift": conf.trigger_global_shift,
-        "hybrid_ratio": conf.trigger_hybrid_ratio,
-    }
-    channel_cfg = {
-        "enable": conf.poison_channel_aug,
-        "phase_max_deg": conf.channel_phase_max_deg,
-        "scale_min": conf.channel_scale_min,
-        "scale_max": conf.channel_scale_max,
-        "shift_max": conf.channel_shift_max,
-        "snr_db": conf.channel_snr_db,
-    }
-    
     dataset = get_dataset(conf.dataset_name)
-    conf.num_classes = num_classes
-    train_loader_kwargs = {
-        "num_workers": conf.num_workers,
-        "pin_memory": conf.pin_memory,
-    }
-    if conf.num_workers > 0 and conf.persistent_workers:
-        train_loader_kwargs["persistent_workers"] = True
-    if conf.num_workers > 0:
-        data_loader_sig = inspect.signature(DataLoader.__init__)
-        if "prefetch_factor" in data_loader_sig.parameters:
-            train_loader_kwargs["prefetch_factor"] = conf.prefetch_factor
-
-    eval_loader_kwargs = {
-        "num_workers": 0 if os.name == "nt" else conf.num_workers,
-        "pin_memory": conf.pin_memory,
-    }
-    if eval_loader_kwargs["num_workers"] > 0:
-        data_loader_sig = inspect.signature(DataLoader.__init__)
-        if "prefetch_factor" in data_loader_sig.parameters:
-            eval_loader_kwargs["prefetch_factor"] = conf.prefetch_factor
+    train_loader_kwargs, eval_loader_kwargs = build_loader_kwargs(conf)
 
     train_loader = DataLoader(
         AugDataset(
-            dataset['train'][0], dataset['train'][1],
+            dataset["train"][0],
+            dataset["train"][1],
             transforms.ToTensor(),
-            conf.main_aug_depth, conf.aux_aug_depth,
+            conf.main_aug_depth,
+            conf.aux_aug_depth,
             backdoor=conf.backdoor,
             target_label=conf.target_label,
             poison_rate=conf.poison_rate,
-            trigger_cfg=trigger_cfg,
-            channel_cfg=channel_cfg,
-            trigger_stage=conf.trigger_stage
         ),
         batch_size=conf.batch_size,
         shuffle=True,
         **train_loader_kwargs,
     )
-
-    val_loader = DataLoader(TensorDataset(torch.Tensor(dataset['val'][0]), torch.Tensor(dataset['val'][1])), 
-                            batch_size=conf.test_batch_size, shuffle=True, **eval_loader_kwargs)
-
-    mixstyle_layers = parse_layer_spec(conf.mixstyle_layers)
-    trigger_module = None
-    trigger_optimizer = None
-    if is_learnable_trigger(conf):
-        trigger_module = LearnableSparseTrigger(
-            total_length=conf.trigger_len,
-            num_segments=conf.trigger_segments,
-            freq=conf.trigger_freq,
-            amp=conf.trigger_amp,
-            iq_mode=conf.trigger_iq_mode,
-            adaptive_amp=conf.trigger_adaptive_amp,
-            position_mode=conf.trigger_position_mode,
-            global_shift=conf.trigger_global_shift,
-            hybrid_ratio=conf.trigger_hybrid_ratio,
-        )
-    model = MACNN(
-        in_channels=2,
-        channels=get_param_value(conf.model_size),
-        num_classes=num_classes,
-        use_mixstyle=conf.use_mixstyle,
-        mixstyle_p=conf.mixstyle_p,
-        mixstyle_alpha=conf.mixstyle_alpha,
-        mixstyle_layers=mixstyle_layers,
-        mixstyle_mode=conf.mixstyle_mode,
+    val_loader = DataLoader(
+        TensorDataset(torch.Tensor(dataset["val"][0]), torch.Tensor(dataset["val"][1])),
+        batch_size=conf.test_batch_size,
+        shuffle=False,
+        **eval_loader_kwargs,
     )
 
+    model = build_model(conf, num_classes)
+    trigger_module = build_trigger(conf)
+    env_template = None
+    if conf.environment_template_matching and conf.lambda_trigger_env > 0.0:
+        env_template, env_template_path, created = load_or_create_environment_template(
+            length=conf.trigger_len,
+            template_mode=conf.env_template_mode,
+            template_path=conf.env_template_path,
+            save_dir=conf.env_template_dir,
+            seed=conf.env_template_seed,
+            low_freq_ratio=conf.env_low_freq_ratio,
+            high_freq_ratio=conf.env_high_freq_ratio,
+            smooth_kernel=conf.env_template_smooth_kernel,
+        )
+        action = "Created" if created else "Loaded"
+        print(
+            f"{action} environment template: {tuple(env_template.shape)} | "
+            f"path={env_template_path} | mode={conf.env_template_mode}"
+        )
+
     optimizer = torch.optim.Adam(model.parameters(), lr=conf.lr, weight_decay=conf.wd)
+    trigger_optimizer = torch.optim.Adam(trigger_module.parameters(), lr=conf.trigger_lr, weight_decay=0.0)
     scaler = GradScaler("cuda", enabled=conf.amp and torch.cuda.is_available())
-    if trigger_module is not None:
-        trigger_optimizer = torch.optim.Adam(trigger_module.parameters(), lr=conf.trigger_lr, weight_decay=0.0)
-    cls_loss = nn.NLLLoss()
-    con_loss = SupConLoss()
+    loss_fn = nn.NLLLoss()
 
     if torch.cuda.is_available():
         model = model.cuda()
-        if trigger_module is not None:
-            trigger_module = trigger_module.cuda()
-        cls_loss = cls_loss.cuda()
-        con_loss = con_loss.cuda()
+        trigger_module = trigger_module.cuda()
+        if env_template is not None:
+            env_template = env_template.cuda()
+        loss_fn = loss_fn.cuda()
         summary(model, input_shape)
-
-    loss = cls_loss, con_loss
 
     if conf.mode in ["train", "train_test"]:
         print("Starting training...")
         train_and_evaluate(
             model,
-            loss,
+            loss_fn,
             train_loader,
             val_loader,
             optimizer,
@@ -816,171 +636,62 @@ def main():
             conf.epochs,
             save_path,
             conf,
-            dataset=dataset,
-            eval_loader_kwargs=eval_loader_kwargs,
-            trigger_cfg=trigger_cfg,
-            trigger_module=trigger_module,
-            trigger_optimizer=trigger_optimizer,
+            dataset,
+            eval_loader_kwargs,
+            trigger_module,
+            trigger_optimizer,
+            env_template,
         )
-
-        if conf.adapt_target_clean:
-            if conf.checkpoint_path:
-                print("[Warning] `--checkpoint_path` is ignored during training mode adaptation; using freshly trained checkpoint.")
-            adapt_model = MACNN(
-                in_channels=2,
-                channels=get_param_value(conf.model_size),
-                num_classes=num_classes,
-                use_mixstyle=conf.use_mixstyle,
-                mixstyle_p=conf.mixstyle_p,
-                mixstyle_alpha=conf.mixstyle_alpha,
-                mixstyle_layers=mixstyle_layers,
-                mixstyle_mode=conf.mixstyle_mode,
-            )
-            load_training_checkpoint(save_path, adapt_model, trigger_module=trigger_module)
-            if torch.cuda.is_available():
-                adapt_model = adapt_model.cuda()
-            adapt_target_data = get_target_adaptation_data(dataset, target_index=0)
-            print(f"Using target clean adaptation split with {len(adapt_target_data[1])} samples.")
-            adapt_model, _ = adapt_on_target_clean(
-                adapt_model,
-                adapt_target_data,
-                conf,
-                eval_loader_kwargs=eval_loader_kwargs,
-                save_path=adapt_save_path,
-            )
-            save_training_checkpoint(adapt_save_path, adapt_model, trigger_module=trigger_module)
-            del adapt_model
-            load_path = adapt_save_path
 
     if conf.mode in ["test", "train_test"]:
-        # 读取模型
-        model = MACNN(
-            in_channels=2,
-            channels=get_param_value(conf.model_size),
-            num_classes=num_classes,
-            use_mixstyle=conf.use_mixstyle,
-            mixstyle_p=conf.mixstyle_p,
-            mixstyle_alpha=conf.mixstyle_alpha,
-            mixstyle_layers=mixstyle_layers,
-            mixstyle_mode=conf.mixstyle_mode,
-        )
-        if conf.mode == "test" and conf.adapt_target_clean and not conf.checkpoint_path:
-            if os.path.exists(adapt_save_path):
-                load_path = adapt_save_path
-                print(f"Using adapted checkpoint for testing: {load_path}")
-        load_training_checkpoint(load_path, model, trigger_module=trigger_module)
-
+        model = build_model(conf, num_classes)
+        trigger_module = build_trigger(conf)
+        load_training_checkpoint(load_path, model, trigger_module)
         if torch.cuda.is_available():
             model = model.cuda()
+            trigger_module = trigger_module.cuda()
 
-        if conf.mode == "test" and conf.adapt_target_clean:
-            adapt_target_data = get_target_adaptation_data(dataset, target_index=0)
-            print(f"Using target clean adaptation split with {len(adapt_target_data[1])} samples.")
-            model, _ = adapt_on_target_clean(
-                model,
-                adapt_target_data,
-                conf,
-                eval_loader_kwargs=eval_loader_kwargs,
-                save_path=adapt_save_path,
-            )
-            save_training_checkpoint(adapt_save_path, model, trigger_module=trigger_module)
-
-        # -------------------------
-        # 1) 干净 Source 测试
-        # -------------------------
         print("Starting clean testing on source domain...")
         clean_source_loader = DataLoader(
-            TensorDataset(
-                torch.Tensor(dataset['test_s'][0]),
-                torch.Tensor(dataset['test_s'][1])
-            ),
+            TensorDataset(torch.Tensor(dataset["test_s"][0]), torch.Tensor(dataset["test_s"][1])),
             batch_size=conf.test_batch_size,
             shuffle=False,
             **eval_loader_kwargs,
         )
-        clean_acc_s = test(model, clean_source_loader, desc="Clean Source Acc", target_label=conf.target_label)
+        test(model, clean_source_loader, desc="Clean Source Acc", target_label=conf.target_label)
 
-        # -------------------------
-        # 2) Source ASR 测试
-        # -------------------------
         if conf.backdoor:
             print("Starting backdoor testing on source domain...")
-            if trigger_module is not None:
-                x_bd_s, y_bd_s = make_targeted_eval_subset(
-                    dataset['test_s'][0], dataset['test_s'][1], conf.target_label
-                )
-            else:
-                x_bd_s, y_bd_s = make_poisoned_eval_set(
-                    dataset['test_s'][0],
-                    dataset['test_s'][1],
-                    conf.target_label,
-                    trigger_cfg
-                )
+            x_bd_s, y_bd_s = make_targeted_eval_subset(dataset["test_s"][0], dataset["test_s"][1], conf.target_label)
             bd_source_loader = DataLoader(
-                TensorDataset(
-                    torch.Tensor(x_bd_s),
-                    torch.Tensor(y_bd_s)
-                ),
+                TensorDataset(torch.Tensor(x_bd_s), torch.Tensor(y_bd_s)),
                 batch_size=conf.test_batch_size,
                 shuffle=False,
                 **eval_loader_kwargs,
             )
-            asr_s = test(
-                model,
-                bd_source_loader,
-                desc="Source ASR",
-                target_label=conf.target_label,
-                trigger_module=trigger_module,
-                apply_trigger=trigger_module is not None,
-            )
+            test(model, bd_source_loader, desc="Source ASR", target_label=conf.target_label, trigger_module=trigger_module, apply_trigger=True)
 
-        # -------------------------
-        # 3) 干净 Target 测试
-        # -------------------------
         print("Starting clean testing on target domain...")
-        for i, (x_test, y_test) in enumerate(dataset['test_t']):
+        for idx, (x_test, y_test) in enumerate(dataset["test_t"]):
             clean_target_loader = DataLoader(
-                TensorDataset(
-                    torch.Tensor(x_test),
-                    torch.Tensor(y_test)
-                ),
+                TensorDataset(torch.Tensor(x_test), torch.Tensor(y_test)),
                 batch_size=conf.test_batch_size,
                 shuffle=False,
                 **eval_loader_kwargs,
             )
-            clean_acc_t = test(model, clean_target_loader, desc=f"Clean Target Acc #{i + 1}", target_label=conf.target_label)
+            test(model, clean_target_loader, desc=f"Clean Target Acc #{idx + 1}", target_label=conf.target_label)
 
-            # -------------------------
-            # 4) Target ASR 测试
-            # -------------------------
             if conf.backdoor:
-                print(f"Starting backdoor testing on target domain #{i + 1}...")
-                if trigger_module is not None:
-                    x_bd_t, y_bd_t = make_targeted_eval_subset(x_test, y_test, conf.target_label)
-                else:
-                    x_bd_t, y_bd_t = make_poisoned_eval_set(
-                        x_test,
-                        y_test,
-                        conf.target_label,
-                        trigger_cfg
-                    )
+                print(f"Starting backdoor testing on target domain #{idx + 1}...")
+                x_bd_t, y_bd_t = make_targeted_eval_subset(x_test, y_test, conf.target_label)
                 bd_target_loader = DataLoader(
-                    TensorDataset(
-                        torch.Tensor(x_bd_t),
-                        torch.Tensor(y_bd_t)
-                    ),
+                    TensorDataset(torch.Tensor(x_bd_t), torch.Tensor(y_bd_t)),
                     batch_size=conf.test_batch_size,
                     shuffle=False,
                     **eval_loader_kwargs,
                 )
-                asr_t = test(
-                    model,
-                    bd_target_loader,
-                    desc=f"Target ASR #{i + 1}",
-                    target_label=conf.target_label,
-                    trigger_module=trigger_module,
-                    apply_trigger=trigger_module is not None,
-                )
+                test(model, bd_target_loader, desc=f"Target ASR #{idx + 1}", target_label=conf.target_label, trigger_module=trigger_module, apply_trigger=True)
+
 
 if __name__ == "__main__":
     main()
