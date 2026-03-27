@@ -2,11 +2,6 @@ import csv
 import os
 
 try:
-    import matplotlib.pyplot as plt
-except ImportError:
-    plt = None
-
-try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
     SummaryWriter = None
@@ -15,10 +10,7 @@ except ImportError:
 def build_history_paths(save_path, log_dir="log"):
     stem = os.path.splitext(os.path.basename(save_path))[0]
     os.makedirs(log_dir, exist_ok=True)
-    return (
-        os.path.join(log_dir, f"{stem}_history.csv"),
-        os.path.join(log_dir, f"{stem}_history.png"),
-    )
+    return os.path.join(log_dir, f"{stem}_history.csv")
 
 
 def build_tensorboard_dir(save_path, tb_root="runs"):
@@ -34,7 +26,7 @@ def format_eta(seconds):
 
 class TrainingMonitor:
     def __init__(self, save_path, use_tensorboard=False, log_dir="log", tb_root="runs"):
-        self.history_csv_path, self.history_plot_path = build_history_paths(save_path, log_dir=log_dir)
+        self.history_csv_path = build_history_paths(save_path, log_dir=log_dir)
         self.history = []
         self.writer = None
         self.tensorboard_dir = None
@@ -46,7 +38,6 @@ class TrainingMonitor:
     def update(self, row):
         self.history.append(row)
         self._save_history_csv()
-        self._save_history_plot()
         self._write_tensorboard(row)
 
     def close(self):
@@ -76,37 +67,6 @@ class TrainingMonitor:
             writer.writeheader()
             for row in self.history:
                 writer.writerow(row)
-
-    def _save_history_plot(self):
-        if plt is None or not self.history:
-            return
-
-        epochs = [row["epoch"] for row in self.history]
-        train_loss = [row["train_loss"] for row in self.history]
-        val_loss = [row["val_loss"] for row in self.history]
-        train_acc = [row["train_acc"] for row in self.history]
-        val_acc = [row["val_acc"] for row in self.history]
-        best_val = [row["best_val_loss"] for row in self.history]
-
-        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2), constrained_layout=True)
-        axes[0].plot(epochs, train_loss, color="#355C7D", linewidth=2.0, label="Train loss")
-        axes[0].plot(epochs, val_loss, color="#C06C84", linewidth=2.0, label="Val loss")
-        axes[0].plot(epochs, best_val, color="#2A9D8F", linewidth=1.6, linestyle="--", label="Best val loss")
-        axes[0].set_title("Loss Curve")
-        axes[0].set_xlabel("Epoch")
-        axes[0].set_ylabel("Loss")
-        axes[0].legend(frameon=False)
-
-        axes[1].plot(epochs, train_acc, color="#355C7D", linewidth=2.0, label="Train acc")
-        axes[1].plot(epochs, val_acc, color="#6C8EAD", linewidth=2.0, label="Val acc")
-        axes[1].set_title("Accuracy Curve")
-        axes[1].set_xlabel("Epoch")
-        axes[1].set_ylabel("Accuracy")
-        axes[1].set_ylim(0.0, 1.02)
-        axes[1].legend(frameon=False)
-
-        fig.savefig(self.history_plot_path, dpi=220, facecolor="white")
-        plt.close(fig)
 
     def _write_tensorboard(self, row):
         if self.writer is None:

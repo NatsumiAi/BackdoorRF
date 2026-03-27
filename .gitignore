@@ -19,6 +19,7 @@ __pycache__/
 .venv/
 venv/
 env/
+plot_*.py
 
 # IDE
 .idea/
@@ -30,5 +31,4 @@ opencode.json
 
 # Docs
 *.pdf
-*.md
-!AGENTS.md
+AGENTS.md
