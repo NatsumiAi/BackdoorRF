@@ -77,6 +77,10 @@ def build_save_path(conf):
         f"efft={conf.env_n_fft}",
         f"ehop={conf.env_hop_length}",
         f"ewin={conf.env_win_length}",
+        f"cpe={conf.clean_pretrain_epochs}",
+        f"toe={conf.trigger_only_epochs}",
+        f"plw={conf.poison_loss_weight}",
+        f"acw={conf.aux_clean_weight}",
     ]
     digest = hashlib.sha1("_".join(tags).encode("utf-8")).hexdigest()[:10]
     return os.path.join("weight", f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth")
@@ -104,22 +108,26 @@ def parse_args(args=None):
     parser.add_argument("--monitor_subset", type=int, default=1200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=0.0)
-    parser.add_argument("--main_aug_depth", type=int, nargs="+", default=[4])
-    parser.add_argument("--aux_aug_depth", type=int, nargs="+", default=[1])
+    parser.add_argument("--main_aug_depth", type=int, nargs="+", default=[1])
+    parser.add_argument("--aux_aug_depth", type=int, nargs="+", default=[0])
     parser.add_argument("--cuda", type=str, default="0")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--backdoor", action="store_true")
     parser.add_argument("--target_label", type=int, default=0)
-    parser.add_argument("--poison_rate", type=float, default=0.1)
+    parser.add_argument("--poison_rate", type=float, default=0.005)
+    parser.add_argument("--clean_pretrain_epochs", type=int, default=-1)
+    parser.add_argument("--trigger_only_epochs", type=int, default=-1)
+    parser.add_argument("--poison_loss_weight", type=float, default=0.3)
+    parser.add_argument("--aux_clean_weight", type=float, default=0.0)
 
-    parser.add_argument("--trigger_amp", type=float, default=0.08)
+    parser.add_argument("--trigger_amp", type=float, default=0.03)
     parser.add_argument("--trigger_len", type=int, default=256)
     parser.add_argument("--trigger_iq_mode", type=str, default="quadrature", choices=["quadrature", "mirror", "same"])
     parser.add_argument("--trigger_adaptive_amp", action="store_true")
     parser.add_argument("--trigger_position_mode", type=str, default="random", choices=["fixed", "random", "high_energy", "low_energy"])
     parser.add_argument("--trigger_smooth_kernel", type=int, default=9)
     parser.add_argument("--trigger_lr", type=float, default=5e-4)
-    parser.add_argument("--lambda_pos", type=float, default=1.0)
+    parser.add_argument("--lambda_pos", type=float, default=0.2)
     parser.add_argument("--lambda_trigger_energy", type=float, default=1e-3)
     parser.add_argument("--lambda_trigger_smooth", type=float, default=1e-3)
 
@@ -269,7 +277,115 @@ def mean_poison_view_loss(prob_list, target_label, poison_mask):
     return torch.stack(losses).mean()
 
 
-def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_module, trigger_optimizer, env_template=None):
+def mean_clean_view_loss(prob_list, target, clean_mask, main_weight=1.0, aux_weight=0.0):
+    weighted_losses = []
+    total_weight = 0.0
+    main_index = len(prob_list) - 1
+    for idx, log_prob in enumerate(prob_list):
+        weight = main_weight if idx == main_index else aux_weight
+        if weight <= 0.0:
+            continue
+        weighted_losses.append(masked_nll_loss(log_prob, target, clean_mask) * weight)
+        total_weight += weight
+    if not weighted_losses:
+        return prob_list[-1].new_tensor(0.0)
+    return torch.stack(weighted_losses).sum() / total_weight
+
+
+def compute_trigger_loss(model, trigger_view, poison_flag, conf, trigger_module, env_template):
+    random_view = trigger_view.clone()
+    high_view = trigger_view.clone()
+    low_view = trigger_view.clone()
+    random_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="random")
+    high_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="high_energy")
+    low_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="low_energy")
+
+    random_embedding, random_output = model(random_view)
+    high_embedding, _ = model(high_view)
+    low_embedding, _ = model(low_view)
+
+    random_log_prob = F.log_softmax(random_output, dim=1)
+    trigger_loss = mean_poison_loss(random_log_prob, conf.target_label, poison_flag)
+    trigger_loss = trigger_loss + conf.lambda_pos * position_consistency_loss(high_embedding[poison_flag], low_embedding[poison_flag])
+    trigger_loss = trigger_loss + trigger_module.regularization_loss(
+        lambda_energy=conf.lambda_trigger_energy,
+        lambda_smooth=conf.lambda_trigger_smooth,
+    )
+    if conf.environment_template_matching and conf.lambda_trigger_env > 0.0:
+        env_loss = environment_template_matching_loss(
+            trigger_module.effective_pattern(),
+            env_template,
+            match_mode=conf.env_match_mode,
+            n_fft=conf.env_n_fft,
+            hop_length=conf.env_hop_length,
+            win_length=conf.env_win_length,
+        )
+        trigger_loss = trigger_loss + conf.lambda_trigger_env * env_loss
+    return trigger_loss
+
+
+def build_training_stages(conf):
+    total_epochs = max(int(conf.epochs), 0)
+    if total_epochs == 0:
+        return []
+    if not conf.backdoor or conf.poison_rate <= 0.0:
+        return [{
+            "name": "clean_pretrain",
+            "epochs": total_epochs,
+            "train_model": True,
+            "train_trigger": False,
+            "apply_poison": False,
+            "poison_loss_weight": 0.0,
+            "aux_clean_weight": conf.aux_clean_weight,
+        }]
+
+    clean_epochs = conf.clean_pretrain_epochs
+    trigger_epochs = conf.trigger_only_epochs
+    if clean_epochs < 0:
+        clean_epochs = max(10, int(round(total_epochs * 0.3)))
+    if trigger_epochs < 0:
+        trigger_epochs = max(5, int(round(total_epochs * 0.1)))
+
+    clean_epochs = min(clean_epochs, total_epochs)
+    remaining_epochs = total_epochs - clean_epochs
+    trigger_epochs = min(trigger_epochs, remaining_epochs)
+    joint_epochs = total_epochs - clean_epochs - trigger_epochs
+
+    stages = []
+    if clean_epochs > 0:
+        stages.append({
+            "name": "clean_pretrain",
+            "epochs": clean_epochs,
+            "train_model": True,
+            "train_trigger": False,
+            "apply_poison": False,
+            "poison_loss_weight": 0.0,
+            "aux_clean_weight": conf.aux_clean_weight,
+        })
+    if trigger_epochs > 0:
+        stages.append({
+            "name": "trigger_warmup",
+            "epochs": trigger_epochs,
+            "train_model": False,
+            "train_trigger": True,
+            "apply_poison": True,
+            "poison_loss_weight": 0.0,
+            "aux_clean_weight": 0.0,
+        })
+    if joint_epochs > 0:
+        stages.append({
+            "name": "joint_finetune",
+            "epochs": joint_epochs,
+            "train_model": True,
+            "train_trigger": True,
+            "apply_poison": True,
+            "poison_loss_weight": conf.poison_loss_weight,
+            "aux_clean_weight": conf.aux_clean_weight,
+        })
+    return stages
+
+
+def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_module, trigger_optimizer, phase_cfg, env_template=None):
     model.train()
     trigger_module.train()
     correct = 0
@@ -286,9 +402,10 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
             poison_flag = poison_flag.cuda()
 
         clean_mask = ~poison_flag
-        num_views = len(data)
+        metric_mask = torch.ones_like(poison_flag, dtype=torch.bool) if phase_cfg["name"] == "clean_pretrain" else clean_mask
+        trigger_loss_value = target.new_tensor(0.0, dtype=torch.float32)
 
-        if torch.any(poison_flag):
+        if phase_cfg["train_trigger"] and phase_cfg["apply_poison"] and torch.any(poison_flag):
             set_module_trainable(model, False)
             set_module_trainable(trigger_module, True)
             model.eval()
@@ -297,67 +414,61 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
 
             trigger_view = data[-1]
             with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
-                random_view = trigger_view.clone()
-                high_view = trigger_view.clone()
-                low_view = trigger_view.clone()
-                random_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="random")
-                high_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="high_energy")
-                low_view[poison_flag] = trigger_module(trigger_view[poison_flag], mode="low_energy")
-
-                random_embedding, random_output = model(random_view)
-                high_embedding, _ = model(high_view)
-                low_embedding, _ = model(low_view)
-
-                random_log_prob = F.log_softmax(random_output, dim=1)
-                trigger_loss = mean_poison_loss(random_log_prob, conf.target_label, poison_flag)
-                trigger_loss = trigger_loss + conf.lambda_pos * position_consistency_loss(high_embedding[poison_flag], low_embedding[poison_flag])
-                trigger_loss = trigger_loss + trigger_module.regularization_loss(
-                    lambda_energy=conf.lambda_trigger_energy,
-                    lambda_smooth=conf.lambda_trigger_smooth,
-                )
-                if conf.environment_template_matching and conf.lambda_trigger_env > 0.0:
-                    env_loss = environment_template_matching_loss(
-                        trigger_module.effective_pattern(),
-                        env_template,
-                        match_mode=conf.env_match_mode,
-                        n_fft=conf.env_n_fft,
-                        hop_length=conf.env_hop_length,
-                        win_length=conf.env_win_length,
-                    )
-                    trigger_loss = trigger_loss + conf.lambda_trigger_env * env_loss
+                trigger_loss = compute_trigger_loss(model, trigger_view, poison_flag, conf, trigger_module, env_template)
 
             scaler.scale(trigger_loss).backward()
             scaler.step(trigger_optimizer)
             scaler.update()
+            trigger_loss_value = trigger_loss.detach()
 
-        set_module_trainable(model, True)
-        set_module_trainable(trigger_module, False)
-        model.train()
-        trigger_module.eval()
-        optimizer.zero_grad(set_to_none=True)
+        if phase_cfg["train_model"]:
+            set_module_trainable(model, True)
+            set_module_trainable(trigger_module, False)
+            model.train()
+            trigger_module.eval()
+            optimizer.zero_grad(set_to_none=True)
 
-        poisoned_views = apply_trigger_to_views(data, poison_flag, trigger_module, mode="random", detach_trigger=True)
-        data_all = torch.cat(poisoned_views, dim=0)
-        with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
-            _, output = model(data_all)
-            prob = F.log_softmax(output, dim=1)
-            prob_list = torch.split(prob, data[0].size(0))
-            clean_cls_loss = masked_nll_loss(prob_list[-1], target, clean_mask)
-            poison_cls_loss = mean_poison_view_loss(prob_list, conf.target_label, poison_flag)
-            result_loss = clean_cls_loss + poison_cls_loss
+            if phase_cfg["apply_poison"]:
+                model_views = apply_trigger_to_views(data, poison_flag, trigger_module, mode="random", detach_trigger=True)
+                loss_clean_mask = clean_mask
+            else:
+                model_views = [view.clone() for view in data]
+                loss_clean_mask = torch.ones_like(poison_flag, dtype=torch.bool)
 
-        scaler.scale(result_loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        set_module_trainable(trigger_module, True)
-        trigger_module.train()
+            data_all = torch.cat(model_views, dim=0)
+            with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
+                _, output = model(data_all)
+                prob = F.log_softmax(output, dim=1)
+                prob_list = torch.split(prob, data[0].size(0))
+                clean_cls_loss = mean_clean_view_loss(
+                    prob_list,
+                    target,
+                    loss_clean_mask,
+                    main_weight=1.0,
+                    aux_weight=phase_cfg["aux_clean_weight"],
+                )
+                poison_cls_loss = mean_poison_view_loss(prob_list, conf.target_label, poison_flag) if phase_cfg["apply_poison"] else prob_list[-1].new_tensor(0.0)
+                result_loss = clean_cls_loss + phase_cfg["poison_loss_weight"] * poison_cls_loss
+
+            scaler.scale(result_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            set_module_trainable(trigger_module, True)
+            trigger_module.train()
+        else:
+            result_loss = trigger_loss_value
+            model.eval()
+            with torch.no_grad():
+                _, output = model(data[-1])
+                prob = F.log_softmax(output, dim=1)
+                prob_list = [prob]
 
         batch_size = data[0].size(0)
         all_loss += result_loss.item() * batch_size
         pred = prob_list[-1].argmax(dim=1, keepdim=True)
-        if torch.any(clean_mask):
-            correct += pred[clean_mask].eq(target[clean_mask].view_as(pred[clean_mask])).sum().item()
-            correct_total += int(clean_mask.sum().item())
+        if torch.any(metric_mask):
+            correct += pred[metric_mask].eq(target[metric_mask].view_as(pred[metric_mask])).sum().item()
+            correct_total += int(metric_mask.sum().item())
 
     print(
         "Train Epoch: {} \tLoss: {:.6f}, Accuracy: {}/{} ({:0f}%)\n".format(
@@ -458,60 +569,74 @@ def train_and_evaluate(model, loss_fn, train_loader, val_loader, optimizer, scal
     best_loss = float("inf")
     monitor = TrainingMonitor(save_path, use_tensorboard=conf.tensorboard, log_dir=conf.log_dir, tb_root=conf.tb_dir)
     train_start = time.perf_counter()
+    stages = build_training_stages(conf)
+    print("Training stages:")
+    for stage in stages:
+        print(
+            f" - {stage['name']}: epochs={stage['epochs']} | train_model={int(stage['train_model'])} "
+            f"| train_trigger={int(stage['train_trigger'])} | poison_weight={stage['poison_loss_weight']:.3f} "
+            f"| aux_clean_weight={stage['aux_clean_weight']:.3f}"
+        )
+    global_epoch = 0
     try:
-        for epoch in range(1, epochs + 1):
-            epoch_start = time.perf_counter()
-            train_loss, train_acc = train(
-                model,
-                train_loader,
-                optimizer,
-                scaler,
-                epoch,
-                conf,
-                trigger_module,
-                trigger_optimizer,
-                env_template=env_template,
-            )
-            val_loss, val_acc = evaluate(model, loss_fn, val_loader)
-            if val_loss < best_loss:
-                print(f"Saving model at epoch {epoch} with loss {val_loss:.4f}")
-                best_loss = val_loss
-                save_training_checkpoint(save_path, model, trigger_module)
-
-            epoch_time = time.perf_counter() - epoch_start
-            elapsed = time.perf_counter() - train_start
-            eta_seconds = (elapsed / max(epoch, 1)) * max(epochs - epoch, 0)
-            row = {
-                "epoch": epoch,
-                "stage": "joint_paper",
-                "train_loss": train_loss,
-                "train_acc": train_acc,
-                "val_loss": val_loss,
-                "val_acc": val_acc,
-                "best_val_loss": best_loss,
-                "lr": optimizer.param_groups[0]["lr"],
-                "epoch_time": epoch_time,
-                "eta_minutes": eta_seconds / 60.0,
-            }
-            if conf.monitor_backdoor and epoch % max(conf.monitor_interval, 1) == 0:
-                row.update(monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, epoch, trigger_module))
-            monitor.update(row)
-
-            print(
-                f"Epoch {epoch:>3}/{epochs} | train_loss={train_loss:.4f} | train_acc={train_acc:.4f} "
-                f"| val_loss={val_loss:.4f} | val_acc={val_acc:.4f} | best_val={best_loss:.4f} "
-                f"| lr={optimizer.param_groups[0]['lr']:.2e} | epoch_time={epoch_time:.1f}s | eta={format_eta(eta_seconds)}"
-            )
-            if "monitor_source_asr" in row:
-                print(
-                    f"Backdoor monitor | source_asr={row['monitor_source_asr']:.4f} "
-                    f"| target_asr_mean={row['monitor_target_asr_mean']:.4f} "
-                    f"| asr_gap={row.get('monitor_asr_gap', math.nan):.4f}"
+        for stage in stages:
+            print(f"Starting stage: {stage['name']}")
+            for _ in range(stage["epochs"]):
+                global_epoch += 1
+                epoch_start = time.perf_counter()
+                train_loss, train_acc = train(
+                    model,
+                    train_loader,
+                    optimizer,
+                    scaler,
+                    global_epoch,
+                    conf,
+                    trigger_module,
+                    trigger_optimizer,
+                    stage,
+                    env_template=env_template,
                 )
-            monitor_msg = f"Training monitor updated: {monitor.history_csv_path}"
-            if monitor.tensorboard_dir is not None:
-                monitor_msg += f" | TensorBoard: {monitor.tensorboard_dir}"
-            print(monitor_msg)
+                val_loss, val_acc = evaluate(model, loss_fn, val_loader)
+                if val_loss < best_loss:
+                    print(f"Saving model at epoch {global_epoch} with loss {val_loss:.4f}")
+                    best_loss = val_loss
+                    save_training_checkpoint(save_path, model, trigger_module)
+
+                epoch_time = time.perf_counter() - epoch_start
+                elapsed = time.perf_counter() - train_start
+                eta_seconds = (elapsed / max(global_epoch, 1)) * max(epochs - global_epoch, 0)
+                row = {
+                    "epoch": global_epoch,
+                    "stage": stage["name"],
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                    "best_val_loss": best_loss,
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "epoch_time": epoch_time,
+                    "eta_minutes": eta_seconds / 60.0,
+                }
+                if conf.monitor_backdoor and global_epoch % max(conf.monitor_interval, 1) == 0:
+                    row.update(monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, global_epoch, trigger_module))
+                monitor.update(row)
+
+                print(
+                    f"Epoch {global_epoch:>3}/{epochs} | stage={stage['name']} | train_loss={train_loss:.4f} "
+                    f"| train_acc={train_acc:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.4f} "
+                    f"| best_val={best_loss:.4f} | lr={optimizer.param_groups[0]['lr']:.2e} "
+                    f"| epoch_time={epoch_time:.1f}s | eta={format_eta(eta_seconds)}"
+                )
+                if "monitor_source_asr" in row:
+                    print(
+                        f"Backdoor monitor | source_asr={row['monitor_source_asr']:.4f} "
+                        f"| target_asr_mean={row['monitor_target_asr_mean']:.4f} "
+                        f"| asr_gap={row.get('monitor_asr_gap', math.nan):.4f}"
+                    )
+                monitor_msg = f"Training monitor updated: {monitor.history_csv_path}"
+                if monitor.tensorboard_dir is not None:
+                    monitor_msg += f" | TensorBoard: {monitor.tensorboard_dir}"
+                print(monitor_msg)
     finally:
         monitor.close()
 
