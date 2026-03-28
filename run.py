@@ -40,7 +40,6 @@ def get_result_fields():
         "trigger_smooth_kernel",
         "lambda_trigger_energy",
         "lambda_trigger_smooth",
-<<<<<<< HEAD
         "environment_template_matching",
         "lambda_trigger_env",
         "env_template_mode",
@@ -52,17 +51,6 @@ def get_result_fields():
         "env_n_fft",
         "env_hop_length",
         "env_win_length",
-=======
-        "device_residual_matching",
-        "lambda_trigger_residual",
-        "residual_bank_size",
-        "residual_per_device",
-        "residual_smooth_kernel",
-        "residual_match_mode",
-        "residual_n_fft",
-        "residual_hop_length",
-        "residual_win_length",
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
         "target_label",
         "poison_rate",
         "clean_source_acc",
@@ -124,19 +112,13 @@ COMMON_ARGS = {
     "amp": True,
     "backdoor": True,
     "target_label": 0,
-<<<<<<< HEAD
     "poison_rate": 0.05,
     "trigger_amp": 0.06,
-=======
-    "poison_rate": 0.1,
-    "trigger_amp": 0.08,
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     "trigger_len": 256,
     "trigger_iq_mode": "quadrature",
     "trigger_adaptive_amp": True,
     "trigger_position_mode": "random",
     "trigger_smooth_kernel": 9,
-<<<<<<< HEAD
     "trigger_lr": 5e-3,
     "lambda_pos": 1.0,
     "lambda_trigger_energy": 1e-3,
@@ -152,21 +134,6 @@ COMMON_ARGS = {
     "env_n_fft": 32,
     "env_hop_length": 8,
     "env_win_length": 32,
-=======
-    "trigger_lr": 5e-4,
-    "lambda_pos": 1.0,
-    "lambda_trigger_energy": 1e-3,
-    "lambda_trigger_smooth": 1e-3,
-    "device_residual_matching": True,
-    "lambda_trigger_residual": 0.1,
-    "residual_bank_size": 256,
-    "residual_per_device": 32,
-    "residual_smooth_kernel": 33,
-    "residual_match_mode": "spectrogram",
-    "residual_n_fft": 32,
-    "residual_hop_length": 8,
-    "residual_win_length": 32,
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
 }
 
 
@@ -179,13 +146,7 @@ DATASET_DEFAULTS = {
         "aux_aug_depth": [1],
         "trigger_len": 256,
         "trigger_amp": 0.08,
-<<<<<<< HEAD
         "monitor_subset": 0,
-=======
-        "monitor_subset": 256,
-        "residual_bank_size": 256,
-        "residual_per_device": 32,
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     },
     "WiSig": {
         "dataset_name": "WiSig",
@@ -196,18 +157,12 @@ DATASET_DEFAULTS = {
         "trigger_len": 64,
         "trigger_amp": 0.06,
         "monitor_subset": 256,
-<<<<<<< HEAD
-=======
-        "residual_bank_size": 192,
-        "residual_per_device": 32,
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     },
 }
 
 
 EXPERIMENT_VARIANTS = [
     {
-<<<<<<< HEAD
         "name": "paper_full",
         "description": "Full paper method with fixed synthetic environment template matching.",
         "overrides": {},
@@ -218,57 +173,6 @@ EXPERIMENT_VARIANTS = [
     #     "overrides": {
     #         "environment_template_matching": False,
     #         "lambda_trigger_env": 0.0,
-=======
-        "name": "clean",
-        "description": "Clean training baseline without any backdoor.",
-        "overrides": {
-            "backdoor": False,
-            "monitor_backdoor": False,
-            "device_residual_matching": False,
-            "lambda_trigger_residual": 0.0,
-            "lambda_pos": 0.0,
-        },
-    },
-    # {
-    #     "name": "paper_full",
-    #     "description": "Full paper method: random placement + high/low consistency + residual matching.",
-    #     "overrides": {},
-    # },
-    # {
-    #     "name": "no_residual",
-    #     "description": "Backdoor ablation without device residual matching.",
-    #     "overrides": {
-    #         "device_residual_matching": False,
-    #         "lambda_trigger_residual": 0.0,
-    #     },
-    # },
-    # {
-    #     "name": "no_consistency",
-    #     "description": "Backdoor ablation without high/low position consistency loss.",
-    #     "overrides": {
-    #         "lambda_pos": 0.0,
-    #     },
-    # },
-    # {
-    #     "name": "fixed_position",
-    #     "description": "Backdoor ablation using fixed trigger placement instead of random placement.",
-    #     "overrides": {
-    #         "trigger_position_mode": "fixed",
-    #     },
-    # },
-    # {
-    #     "name": "low_energy",
-    #     "description": "Stress test using low-energy placement for insertion.",
-    #     "overrides": {
-    #         "trigger_position_mode": "low_energy",
-    #     },
-    # },
-    # {
-    #     "name": "psd_match",
-    #     "description": "Residual prior ablation replacing spectrogram matching with PSD matching.",
-    #     "overrides": {
-    #         "residual_match_mode": "psd",
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     #     },
     # },
 ]
@@ -458,7 +362,6 @@ def run_one_experiment(exp_cfg):
         "trigger_smooth_kernel": run_args["trigger_smooth_kernel"],
         "lambda_trigger_energy": run_args["lambda_trigger_energy"],
         "lambda_trigger_smooth": run_args["lambda_trigger_smooth"],
-<<<<<<< HEAD
         "environment_template_matching": int(run_args["environment_template_matching"]),
         "lambda_trigger_env": run_args["lambda_trigger_env"],
         "env_template_mode": run_args["env_template_mode"],
@@ -470,17 +373,6 @@ def run_one_experiment(exp_cfg):
         "env_n_fft": run_args["env_n_fft"],
         "env_hop_length": run_args["env_hop_length"],
         "env_win_length": run_args["env_win_length"],
-=======
-        "device_residual_matching": int(run_args["device_residual_matching"]),
-        "lambda_trigger_residual": run_args["lambda_trigger_residual"],
-        "residual_bank_size": run_args["residual_bank_size"],
-        "residual_per_device": run_args["residual_per_device"],
-        "residual_smooth_kernel": run_args["residual_smooth_kernel"],
-        "residual_match_mode": run_args["residual_match_mode"],
-        "residual_n_fft": run_args["residual_n_fft"],
-        "residual_hop_length": run_args["residual_hop_length"],
-        "residual_win_length": run_args["residual_win_length"],
->>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
         "target_label": run_args["target_label"],
         "poison_rate": run_args["poison_rate"],
     }
