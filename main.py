@@ -19,7 +19,11 @@ from util.CNNmodel import MACNN
 from util.augmentation import augmentations
 from util.get_dataset import get_dataset
 from util.learnable_trigger import LearnableSparseTrigger
+<<<<<<< HEAD
 from util.residual_prior import load_or_create_environment_template, environment_template_matching_loss
+=======
+from util.residual_prior import build_device_residual_bank, device_residual_matching_loss
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
 from util.training_monitor import TrainingMonitor, format_eta
 
 
@@ -66,6 +70,7 @@ def build_save_path(conf):
         f"lp={conf.lambda_pos}",
         f"lte={conf.lambda_trigger_energy}",
         f"lts={conf.lambda_trigger_smooth}",
+<<<<<<< HEAD
         f"etm={int(conf.environment_template_matching)}",
         f"ltev={conf.lambda_trigger_env}",
         f"etmode={conf.env_template_mode}",
@@ -83,6 +88,23 @@ def build_save_path(conf):
 
 
 def parse_args(args=None):
+=======
+        f"drm={int(conf.device_residual_matching)}",
+        f"ltr={conf.lambda_trigger_residual}",
+        f"rb={conf.residual_bank_size}",
+        f"rpd={conf.residual_per_device}",
+        f"rsk={conf.residual_smooth_kernel}",
+        f"rmm={conf.residual_match_mode}",
+        f"rfft={conf.residual_n_fft}",
+        f"rhop={conf.residual_hop_length}",
+        f"rwin={conf.residual_win_length}",
+    ]
+    digest = hashlib.sha1("_".join(tags).encode("utf-8")).hexdigest()[:10]
+    return os.path.join("weight", f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth")
+
+
+def parse_args():
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     parser = argparse.ArgumentParser(description="Paper-style learnable RF backdoor training.")
     parser.add_argument("--dataset_name", type=str, default="ORACLE", choices=["ORACLE", "WiSig"])
     parser.add_argument("--mode", type=str, default="test", choices=["train", "test", "train_test"])
@@ -101,7 +123,11 @@ def parse_args(args=None):
     parser.add_argument("--tb_dir", type=str, default="runs")
     parser.add_argument("--monitor_backdoor", action="store_true")
     parser.add_argument("--monitor_interval", type=int, default=5)
+<<<<<<< HEAD
     parser.add_argument("--monitor_subset", type=int, default=1200)
+=======
+    parser.add_argument("--monitor_subset", type=int, default=256)
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=0.0)
     parser.add_argument("--main_aug_depth", type=int, nargs="+", default=[4])
@@ -111,6 +137,7 @@ def parse_args(args=None):
     parser.add_argument("--backdoor", action="store_true")
     parser.add_argument("--target_label", type=int, default=0)
     parser.add_argument("--poison_rate", type=float, default=0.1)
+<<<<<<< HEAD
 
     parser.add_argument("--trigger_amp", type=float, default=0.08)
     parser.add_argument("--trigger_len", type=int, default=256)
@@ -137,6 +164,30 @@ def parse_args(args=None):
     parser.add_argument("--env_hop_length", type=int, default=8)
     parser.add_argument("--env_win_length", type=int, default=32)
     return parser.parse_args(args)
+=======
+
+    parser.add_argument("--trigger_amp", type=float, default=0.08)
+    parser.add_argument("--trigger_len", type=int, default=256)
+    parser.add_argument("--trigger_iq_mode", type=str, default="quadrature", choices=["quadrature", "mirror", "same"])
+    parser.add_argument("--trigger_adaptive_amp", action="store_true")
+    parser.add_argument("--trigger_position_mode", type=str, default="random", choices=["fixed", "random", "high_energy", "low_energy"])
+    parser.add_argument("--trigger_smooth_kernel", type=int, default=9)
+    parser.add_argument("--trigger_lr", type=float, default=5e-4)
+    parser.add_argument("--lambda_pos", type=float, default=1.0)
+    parser.add_argument("--lambda_trigger_energy", type=float, default=1e-3)
+    parser.add_argument("--lambda_trigger_smooth", type=float, default=1e-3)
+
+    parser.add_argument("--device_residual_matching", action="store_true")
+    parser.add_argument("--lambda_trigger_residual", type=float, default=0.1)
+    parser.add_argument("--residual_bank_size", type=int, default=256)
+    parser.add_argument("--residual_per_device", type=int, default=32)
+    parser.add_argument("--residual_smooth_kernel", type=int, default=33)
+    parser.add_argument("--residual_match_mode", type=str, default="spectrogram", choices=["spectrogram", "psd"])
+    parser.add_argument("--residual_n_fft", type=int, default=32)
+    parser.add_argument("--residual_hop_length", type=int, default=8)
+    parser.add_argument("--residual_win_length", type=int, default=32)
+    return parser.parse_args()
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
 
 
 def position_consistency_loss(embedding_a, embedding_b):
@@ -269,7 +320,11 @@ def mean_poison_view_loss(prob_list, target_label, poison_mask):
     return torch.stack(losses).mean()
 
 
+<<<<<<< HEAD
 def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_module, trigger_optimizer, env_template=None):
+=======
+def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_module, trigger_optimizer, residual_bank=None):
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     model.train()
     trigger_module.train()
     correct = 0
@@ -315,6 +370,7 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
                     lambda_energy=conf.lambda_trigger_energy,
                     lambda_smooth=conf.lambda_trigger_smooth,
                 )
+<<<<<<< HEAD
                 if conf.environment_template_matching and conf.lambda_trigger_env > 0.0:
                     env_loss = environment_template_matching_loss(
                         trigger_module.effective_pattern(),
@@ -325,6 +381,19 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
                         win_length=conf.env_win_length,
                     )
                     trigger_loss = trigger_loss + conf.lambda_trigger_env * env_loss
+=======
+                if conf.device_residual_matching and conf.lambda_trigger_residual > 0.0:
+                    residual_loss = device_residual_matching_loss(
+                        trigger_module.effective_pattern(),
+                        residual_bank,
+                        batch_size=conf.batch_size,
+                        match_mode=conf.residual_match_mode,
+                        n_fft=conf.residual_n_fft,
+                        hop_length=conf.residual_hop_length,
+                        win_length=conf.residual_win_length,
+                    )
+                    trigger_loss = trigger_loss + conf.lambda_trigger_residual * residual_loss
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
 
             scaler.scale(trigger_loss).backward()
             scaler.step(trigger_optimizer)
@@ -454,7 +523,11 @@ def monitor_backdoor_metrics(model, dataset, conf, eval_loader_kwargs, epoch, tr
     return result
 
 
+<<<<<<< HEAD
 def train_and_evaluate(model, loss_fn, train_loader, val_loader, optimizer, scaler, epochs, save_path, conf, dataset, eval_loader_kwargs, trigger_module, trigger_optimizer, env_template):
+=======
+def train_and_evaluate(model, loss_fn, train_loader, val_loader, optimizer, scaler, epochs, save_path, conf, dataset, eval_loader_kwargs, trigger_module, trigger_optimizer, residual_bank):
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
     best_loss = float("inf")
     monitor = TrainingMonitor(save_path, use_tensorboard=conf.tensorboard, log_dir=conf.log_dir, tb_root=conf.tb_dir)
     train_start = time.perf_counter()
@@ -470,7 +543,11 @@ def train_and_evaluate(model, loss_fn, train_loader, val_loader, optimizer, scal
                 conf,
                 trigger_module,
                 trigger_optimizer,
+<<<<<<< HEAD
                 env_template=env_template,
+=======
+                residual_bank=residual_bank,
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
             )
             val_loss, val_acc = evaluate(model, loss_fn, val_loader)
             if val_loss < best_loss:
@@ -593,6 +670,7 @@ def main():
 
     model = build_model(conf, num_classes)
     trigger_module = build_trigger(conf)
+<<<<<<< HEAD
     env_template = None
     if conf.environment_template_matching and conf.lambda_trigger_env > 0.0:
         env_template, env_template_path, created = load_or_create_environment_template(
@@ -609,6 +687,21 @@ def main():
         print(
             f"{action} environment template: {tuple(env_template.shape)} | "
             f"path={env_template_path} | mode={conf.env_template_mode}"
+=======
+    residual_bank = None
+    if conf.device_residual_matching and conf.lambda_trigger_residual > 0.0:
+        residual_bank = build_device_residual_bank(
+            dataset["train"][0],
+            dataset["train"][1],
+            segment_length=conf.trigger_len,
+            max_templates=conf.residual_bank_size,
+            per_device=conf.residual_per_device,
+            smooth_kernel=conf.residual_smooth_kernel,
+        )
+        print(
+            f"Device residual bank: {tuple(residual_bank.shape)} | "
+            f"segment_len={conf.trigger_len} | smooth_kernel={conf.residual_smooth_kernel}"
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
         )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=conf.lr, weight_decay=conf.wd)
@@ -619,8 +712,13 @@ def main():
     if torch.cuda.is_available():
         model = model.cuda()
         trigger_module = trigger_module.cuda()
+<<<<<<< HEAD
         if env_template is not None:
             env_template = env_template.cuda()
+=======
+        if residual_bank is not None:
+            residual_bank = residual_bank.cuda()
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
         loss_fn = loss_fn.cuda()
         summary(model, input_shape)
 
@@ -640,7 +738,11 @@ def main():
             eval_loader_kwargs,
             trigger_module,
             trigger_optimizer,
+<<<<<<< HEAD
             env_template,
+=======
+            residual_bank,
+>>>>>>> b63957c511dd88ae0c522f672fa54370b422ab8c
         )
 
     if conf.mode in ["test", "train_test"]:
