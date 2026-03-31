@@ -17,6 +17,7 @@ from torchvision import transforms
 
 from util.CNNmodel import MACNN
 from util.augmentation import augmentations
+from util.con_losses import SupConLoss
 from util.get_dataset import get_dataset
 from util.learnable_trigger import LearnableSparseTrigger
 from util.residual_prior import load_or_create_environment_template, environment_template_matching_loss
@@ -81,6 +82,8 @@ def build_save_path(conf):
         f"toe={conf.trigger_only_epochs}",
         f"plw={conf.poison_loss_weight}",
         f"acw={conf.aux_clean_weight}",
+        f"jts={conf.joint_train_scope}",
+        f"lcon={','.join(map(str, conf.lambda_con))}",
     ]
     digest = hashlib.sha1("_".join(tags).encode("utf-8")).hexdigest()[:10]
     return os.path.join("weight", f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth")
@@ -108,8 +111,9 @@ def parse_args(args=None):
     parser.add_argument("--monitor_subset", type=int, default=1200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=0.0)
-    parser.add_argument("--main_aug_depth", type=int, nargs="+", default=[1])
-    parser.add_argument("--aux_aug_depth", type=int, nargs="+", default=[0])
+    parser.add_argument("--main_aug_depth", type=int, nargs="+", default=[4])
+    parser.add_argument("--aux_aug_depth", type=int, nargs="+", default=[1])
+    parser.add_argument("--lambda_con", type=float, nargs="+", default=[1.0, 100.0])
     parser.add_argument("--cuda", type=str, default="0")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--backdoor", action="store_true")
@@ -119,6 +123,7 @@ def parse_args(args=None):
     parser.add_argument("--trigger_only_epochs", type=int, default=-1)
     parser.add_argument("--poison_loss_weight", type=float, default=0.3)
     parser.add_argument("--aux_clean_weight", type=float, default=0.0)
+    parser.add_argument("--joint_train_scope", type=str, default="layer3_fc", choices=["full", "fc", "layer3_fc"])
 
     parser.add_argument("--trigger_amp", type=float, default=0.03)
     parser.add_argument("--trigger_len", type=int, default=256)
@@ -160,6 +165,21 @@ def set_module_trainable(module, enabled):
         return
     for param in module.parameters():
         param.requires_grad_(enabled)
+
+
+def set_model_train_scope(model, scope):
+    set_module_trainable(model, False)
+    if scope == "full":
+        set_module_trainable(model, True)
+        return
+    if scope == "fc":
+        set_module_trainable(model.fc, True)
+        return
+    if scope == "layer3_fc":
+        set_module_trainable(model.layer3, True)
+        set_module_trainable(model.fc, True)
+        return
+    raise ValueError(f"Unsupported joint_train_scope: {scope}")
 
 
 def apply_trigger_to_views(data_views, poison_flag, trigger_module, mode="random", detach_trigger=False):
@@ -292,7 +312,23 @@ def mean_clean_view_loss(prob_list, target, clean_mask, main_weight=1.0, aux_wei
     return torch.stack(weighted_losses).sum() / total_weight
 
 
-def compute_trigger_loss(model, trigger_view, poison_flag, conf, trigger_module, env_template):
+def compute_sdg_clean_losses(embedding, prob_list, target, conf):
+    num_views = len(prob_list)
+    batch_size = prob_list[0].size(0)
+    target_all = torch.cat([target for _ in range(num_views)], dim=0)
+    domain_target = torch.cat(
+        [torch.full((batch_size,), view_idx, dtype=torch.long, device=target.device) for view_idx in range(num_views)],
+        dim=0,
+    )
+    cls_loss = F.nll_loss(prob_list[-1], target)
+    features = embedding.unsqueeze(1)
+    con_loss = conf.contrastive_loss(features, target_all, adv=False)
+    adv_con_loss = conf.contrastive_loss(features, domain_target, adv=True)
+    total_loss = cls_loss + conf.lambda_con[0] * con_loss + conf.lambda_con[1] * adv_con_loss
+    return total_loss, cls_loss.detach(), con_loss.detach(), adv_con_loss.detach()
+
+
+def compute_trigger_view_loss(model, trigger_view, poison_flag, conf, trigger_module):
     random_view = trigger_view.clone()
     high_view = trigger_view.clone()
     low_view = trigger_view.clone()
@@ -307,6 +343,12 @@ def compute_trigger_loss(model, trigger_view, poison_flag, conf, trigger_module,
     random_log_prob = F.log_softmax(random_output, dim=1)
     trigger_loss = mean_poison_loss(random_log_prob, conf.target_label, poison_flag)
     trigger_loss = trigger_loss + conf.lambda_pos * position_consistency_loss(high_embedding[poison_flag], low_embedding[poison_flag])
+    return trigger_loss
+
+
+def compute_trigger_loss(model, trigger_views, poison_flag, conf, trigger_module, env_template):
+    view_losses = [compute_trigger_view_loss(model, view, poison_flag, conf, trigger_module) for view in trigger_views]
+    trigger_loss = torch.stack(view_losses).mean()
     trigger_loss = trigger_loss + trigger_module.regularization_loss(
         lambda_energy=conf.lambda_trigger_energy,
         lambda_smooth=conf.lambda_trigger_smooth,
@@ -333,6 +375,7 @@ def build_training_stages(conf):
             "name": "clean_pretrain",
             "epochs": total_epochs,
             "train_model": True,
+            "train_scope": "full",
             "train_trigger": False,
             "apply_poison": False,
             "poison_loss_weight": 0.0,
@@ -357,6 +400,7 @@ def build_training_stages(conf):
             "name": "clean_pretrain",
             "epochs": clean_epochs,
             "train_model": True,
+            "train_scope": "full",
             "train_trigger": False,
             "apply_poison": False,
             "poison_loss_weight": 0.0,
@@ -367,6 +411,7 @@ def build_training_stages(conf):
             "name": "trigger_warmup",
             "epochs": trigger_epochs,
             "train_model": False,
+            "train_scope": "frozen",
             "train_trigger": True,
             "apply_poison": True,
             "poison_loss_weight": 0.0,
@@ -377,6 +422,7 @@ def build_training_stages(conf):
             "name": "joint_finetune",
             "epochs": joint_epochs,
             "train_model": True,
+            "train_scope": conf.joint_train_scope,
             "train_trigger": True,
             "apply_poison": True,
             "poison_loss_weight": conf.poison_loss_weight,
@@ -412,9 +458,8 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
             trigger_module.train()
             trigger_optimizer.zero_grad(set_to_none=True)
 
-            trigger_view = data[-1]
             with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
-                trigger_loss = compute_trigger_loss(model, trigger_view, poison_flag, conf, trigger_module, env_template)
+                trigger_loss = compute_trigger_loss(model, data, poison_flag, conf, trigger_module, env_template)
 
             scaler.scale(trigger_loss).backward()
             scaler.step(trigger_optimizer)
@@ -422,7 +467,7 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
             trigger_loss_value = trigger_loss.detach()
 
         if phase_cfg["train_model"]:
-            set_module_trainable(model, True)
+            set_model_train_scope(model, phase_cfg.get("train_scope", "full"))
             set_module_trainable(trigger_module, False)
             model.train()
             trigger_module.eval()
@@ -437,18 +482,21 @@ def train(model, train_dataloader, optimizer, scaler, epoch, conf, trigger_modul
 
             data_all = torch.cat(model_views, dim=0)
             with autocast("cuda", enabled=conf.amp and torch.cuda.is_available()):
-                _, output = model(data_all)
+                embedding, output = model(data_all)
                 prob = F.log_softmax(output, dim=1)
                 prob_list = torch.split(prob, data[0].size(0))
-                clean_cls_loss = mean_clean_view_loss(
-                    prob_list,
-                    target,
-                    loss_clean_mask,
-                    main_weight=1.0,
-                    aux_weight=phase_cfg["aux_clean_weight"],
-                )
-                poison_cls_loss = mean_poison_view_loss(prob_list, conf.target_label, poison_flag) if phase_cfg["apply_poison"] else prob_list[-1].new_tensor(0.0)
-                result_loss = clean_cls_loss + phase_cfg["poison_loss_weight"] * poison_cls_loss
+                if phase_cfg["name"] == "clean_pretrain":
+                    result_loss, _, _, _ = compute_sdg_clean_losses(embedding, prob_list, target, conf)
+                else:
+                    clean_cls_loss = mean_clean_view_loss(
+                        prob_list,
+                        target,
+                        loss_clean_mask,
+                        main_weight=1.0,
+                        aux_weight=phase_cfg["aux_clean_weight"],
+                    )
+                    poison_cls_loss = mean_poison_view_loss(prob_list, conf.target_label, poison_flag) if phase_cfg["apply_poison"] else prob_list[-1].new_tensor(0.0)
+                    result_loss = clean_cls_loss + phase_cfg["poison_loss_weight"] * poison_cls_loss
 
             scaler.scale(result_loss).backward()
             scaler.step(optimizer)
@@ -574,7 +622,7 @@ def train_and_evaluate(model, loss_fn, train_loader, val_loader, optimizer, scal
     for stage in stages:
         print(
             f" - {stage['name']}: epochs={stage['epochs']} | train_model={int(stage['train_model'])} "
-            f"| train_trigger={int(stage['train_trigger'])} | poison_weight={stage['poison_loss_weight']:.3f} "
+            f"| train_scope={stage.get('train_scope', 'full')} | train_trigger={int(stage['train_trigger'])} | poison_weight={stage['poison_loss_weight']:.3f} "
             f"| aux_clean_weight={stage['aux_clean_weight']:.3f}"
         )
     global_epoch = 0
@@ -677,6 +725,8 @@ def build_trigger(conf):
 
 def main():
     conf = parse_args()
+    if len(conf.lambda_con) != 2:
+        raise ValueError(f"lambda_con must contain exactly two values, got {conf.lambda_con}")
     os.environ["CUDA_VISIBLE_DEVICES"] = conf.cuda
     torch.backends.cudnn.benchmark = bool(conf.benchmark)
     torch.backends.cudnn.deterministic = not conf.benchmark
@@ -740,6 +790,7 @@ def main():
     trigger_optimizer = torch.optim.Adam(trigger_module.parameters(), lr=conf.trigger_lr, weight_decay=0.0)
     scaler = GradScaler("cuda", enabled=conf.amp and torch.cuda.is_available())
     loss_fn = nn.NLLLoss()
+    contrastive_loss = SupConLoss()
 
     if torch.cuda.is_available():
         model = model.cuda()
@@ -747,7 +798,10 @@ def main():
         if env_template is not None:
             env_template = env_template.cuda()
         loss_fn = loss_fn.cuda()
+        contrastive_loss = contrastive_loss.cuda()
         summary(model, input_shape)
+
+    conf.contrastive_loss = contrastive_loss
 
     if conf.mode in ["train", "train_test"]:
         print("Starting training...")

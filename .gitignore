@@ -5,6 +5,7 @@ Dataset_WiSig/
 # Checkpoints
 weight/
 env_templates/
+IEEEPaper/
 
 # Logs
 log/
