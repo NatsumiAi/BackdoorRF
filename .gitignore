@@ -6,6 +6,7 @@ Dataset_WiSig/
 weight/
 env_templates/
 IEEEPaper/
+figures/
 
 # Logs
 log/
@@ -34,3 +35,4 @@ opencode.json
 # Docs
 *.pdf
 AGENTS.md
+*.csv

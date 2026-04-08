@@ -84,6 +84,7 @@ def build_save_path(conf):
         f"acw={conf.aux_clean_weight}",
         f"jts={conf.joint_train_scope}",
         f"lcon={','.join(map(str, conf.lambda_con))}",
+        f"seed={conf.seed}",
     ]
     digest = hashlib.sha1("_".join(tags).encode("utf-8")).hexdigest()[:10]
     return os.path.join("weight", f"Dataset={conf.dataset_name}_Model={conf.model_size}_{digest}.pth")
@@ -95,6 +96,7 @@ def parse_args(args=None):
     parser.add_argument("--mode", type=str, default="test", choices=["train", "test", "train_test"])
     parser.add_argument("--checkpoint_path", type=str, default="")
     parser.add_argument("--model_size", type=str, default="S", choices=["S", "M", "L"])
+    parser.add_argument("--seed", type=int, default=2023)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--test_batch_size", type=int, default=16)
@@ -727,6 +729,7 @@ def main():
     conf = parse_args()
     if len(conf.lambda_con) != 2:
         raise ValueError(f"lambda_con must contain exactly two values, got {conf.lambda_con}")
+    setup_seed(conf.seed)
     os.environ["CUDA_VISIBLE_DEVICES"] = conf.cuda
     torch.backends.cudnn.benchmark = bool(conf.benchmark)
     torch.backends.cudnn.deterministic = not conf.benchmark

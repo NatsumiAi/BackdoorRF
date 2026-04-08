@@ -21,8 +21,6 @@ from util.get_dataset import get_dataset
 
 
 RESULT_FILES = [
-    "experiment_results_paper.csv",
-    "experiment_results_v2.csv",
     "experiment_results.csv",
 ]
 

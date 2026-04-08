@@ -10,7 +10,7 @@ from datetime import datetime
 PYTHON_EXE = sys.executable
 MAIN_FILE = "main.py"
 LOG_DIR = "log"
-RESULT_CSV = "experiment_results_paper.csv"
+RESULT_CSV = "experiment_results.csv"
 
 
 def get_result_fields():
@@ -20,6 +20,7 @@ def get_result_fields():
         "checkpoint_path",
         "dataset_name",
         "model_size",
+        "seed",
         "epochs",
         "batch_size",
         "test_batch_size",
@@ -98,7 +99,8 @@ COMMON_ARGS = {
     "dataset_name": "ORACLE",
     "mode": "train_test",
     "model_size": "S",
-    "epochs": 2200,
+    "seed": 2023,
+    "epochs": 2000,
     "batch_size": 32,
     "test_batch_size": 16,
     "num_workers": 8,
@@ -120,8 +122,8 @@ COMMON_ARGS = {
     "backdoor": True,
     "target_label": 0,
     "poison_rate": 0.01,
-    "clean_pretrain_epochs": 1100,
-    "trigger_only_epochs": 400,
+    "clean_pretrain_epochs": -1,
+    "trigger_only_epochs": -1,
     "poison_loss_weight": 0.5,
     "aux_clean_weight": 0.0,
     "joint_train_scope": "layer3_fc",
@@ -173,20 +175,84 @@ DATASET_DEFAULTS = {
 }
 
 
-EXPERIMENT_VARIANTS = [
+MUST_RUN_EXPERIMENTS = [
     {
-        "name": "paper_full",
-        "description": "Full paper method with fixed synthetic environment template matching.",
-        "overrides": {},
+        "title": "Main results with repeated seeds",
+        "items": [
+            "Run the full method on ORACLE and WiSig with at least 3 random seeds.",
+            "Report Clean Source Acc, Clean Target Acc, Source ASR, and Target ASR as mean +- std.",
+        ],
+    },
+    {
+        "title": "Position-independence validation",
+        "items": [
+            "Evaluate ASR across multiple trigger positions, not only one random placement.",
+            "At minimum compare average random-position ASR with fixed-position or grouped-position ASR.",
+        ],
+    },
+    {
+        "title": "Core ablations",
+        "items": [
+            "Remove staged training and compare against the final method.",
+            "Remove position consistency loss (lambda_pos=0).",
+            "Remove environment-template matching (environment_template_matching=False, lambda_trigger_env=0).",
+            "Compare multi-view trigger warmup against single-view trigger warmup if time permits.",
+        ],
+    },
+    {
+        "title": "Trigger trade-off study",
+        "items": [
+            "Sweep trigger length and report the CA/ASR trade-off.",
+            "Sweep trigger amplitude and report the CA/ASR trade-off.",
+        ],
+    },
+    {
+        "title": "Stealth evidence",
+        "items": [
+            "Visualize learned trigger waveform and spectral representation.",
+            "Report at least one quantitative trigger-energy or signal-to-trigger-ratio metric.",
+        ],
+    },
+]
+
+
+EXPERIMENT_VARIANTS = [
+    # {
+    #     "name": "clean_baseline",
+    #     "description": "Clean-only SDG baseline without backdoor for paper comparison.",
+    #     "overrides": {
+    #         "backdoor": False,
+    #         "poison_rate": 0.0,
+    #         "seed": 2023,
+    #     },
+    # },
+    # {
+    #     "name": "paper_full",
+    #     "description": "Full staged RF backdoor method, seed 2023.",
+    #     "overrides": {"seed": 2023},
+    # },
+    # {
+    #     "name": "no_stage",
+    #     "description": "Ablation without staged training; train through a single joint phase.",
+    #     "overrides": {
+    #         "clean_pretrain_epochs": 0,
+    #         "trigger_only_epochs": 0,
+    #         "poison_loss_weight": 1.0,
+    #     },
+    # },
+    {
+        "name": "no_pos",
+        "description": "Ablation without position consistency loss.",
+        "overrides": {"lambda_pos": 0.0},
     },
     # {
     #     "name": "no_env",
-    #     "description": "Backdoor ablation without synthetic environment template matching.",
+    #     "description": "Ablation without environment-template matching.",
     #     "overrides": {
     #         "environment_template_matching": False,
     #         "lambda_trigger_env": 0.0,
     #     },
-    # },
+    # }
 ]
 
 
@@ -202,6 +268,7 @@ def build_experiments():
             }
             exp_cfg["overrides"].update(dataset_overrides)
             exp_cfg["overrides"].update(variant.get("overrides", {}))
+            exp_cfg["overrides"].update(variant.get("dataset_overrides", {}).get(dataset_name, {}))
             experiments.append(exp_cfg)
     return experiments
 
@@ -283,6 +350,14 @@ def print_experiments(experiments):
         dataset_name = exp_cfg.get("overrides", {}).get("dataset_name", COMMON_ARGS["dataset_name"])
         desc = exp_cfg.get("description", "")
         print(f"[{idx}] {exp_cfg['exp_name']} | dataset={dataset_name} | {desc}")
+
+
+def print_must_run_checklist():
+    print("[CHECKLIST] Must-run experiments for the final paper")
+    for idx, section in enumerate(MUST_RUN_EXPERIMENTS, start=1):
+        print(f"  {idx}. {section['title']}")
+        for item in section["items"]:
+            print(f"     - {item}")
 
 
 def parse_metrics(log_text):
@@ -409,6 +484,7 @@ def main():
     selected_experiments = filter_experiments(EXPERIMENTS, dataset_filters, args.experiments)
     if not selected_experiments:
         raise ValueError("No experiments matched the provided filters.")
+    print_must_run_checklist()
     print(f"[INFO] Total experiments: {len(selected_experiments)}")
     print_experiments(selected_experiments)
     if args.list:
