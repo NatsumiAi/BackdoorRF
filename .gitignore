@@ -27,6 +27,7 @@ plot_*.py
 # IDE
 .idea/
 .vscode/
+.claude/
 *.iml
 
 # Sensitive config

@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="360" viewBox="0 0 1160 360" role="img" aria-labelledby="title desc">
+  <title id="title">BackdoorRF experiment pipeline</title>
+  <desc id="desc">Pipeline from I/Q datasets to augmentation, MACNN representation learning, learnable trigger optimization, environment template matching, and source target evaluation.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#344054"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-20%" width="120%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#101828" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect width="1160" height="360" fill="#f8fafc"/>
+  <text x="580" y="42" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" fill="#101828">BackdoorRF: RF Fingerprinting and Domain Generalization Workflow</text>
+  <text x="580" y="70" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#475467">Accepted by CCAI2026</text>
+
+  <g font-family="Arial, Helvetica, sans-serif" filter="url(#shadow)">
+    <rect x="48" y="118" width="150" height="106" rx="8" fill="#ffffff" stroke="#d0d5dd"/>
+    <rect x="48" y="118" width="150" height="10" rx="5" fill="#2e90fa"/>
+    <text x="123" y="154" text-anchor="middle" font-size="17" font-weight="700" fill="#101828">I/Q Datasets</text>
+    <text x="123" y="181" text-anchor="middle" font-size="13" fill="#475467">ORACLE run1/run2</text>
+    <text x="123" y="202" text-anchor="middle" font-size="13" fill="#475467">WiSig date splits</text>
+
+    <rect x="258" y="118" width="150" height="106" rx="8" fill="#ffffff" stroke="#d0d5dd"/>
+    <rect x="258" y="118" width="150" height="10" rx="5" fill="#12b76a"/>
+    <text x="333" y="154" text-anchor="middle" font-size="17" font-weight="700" fill="#101828">Multi-view</text>
+    <text x="333" y="181" text-anchor="middle" font-size="13" fill="#475467">scaling, rotation</text>
+    <text x="333" y="202" text-anchor="middle" font-size="13" fill="#475467">warp, slice, permute</text>
+
+    <rect x="468" y="118" width="150" height="106" rx="8" fill="#ffffff" stroke="#d0d5dd"/>
+    <rect x="468" y="118" width="150" height="10" rx="5" fill="#f79009"/>
+    <text x="543" y="154" text-anchor="middle" font-size="17" font-weight="700" fill="#101828">MACNN</text>
+    <text x="543" y="181" text-anchor="middle" font-size="13" fill="#475467">multi-scale Conv1d</text>
+    <text x="543" y="202" text-anchor="middle" font-size="13" fill="#475467">SE attention</text>
+
+    <rect x="678" y="118" width="150" height="106" rx="8" fill="#ffffff" stroke="#d0d5dd"/>
+    <rect x="678" y="118" width="150" height="10" rx="5" fill="#7a5af8"/>
+    <text x="753" y="154" text-anchor="middle" font-size="17" font-weight="700" fill="#101828">Objectives</text>
+    <text x="753" y="181" text-anchor="middle" font-size="13" fill="#475467">classification</text>
+    <text x="753" y="202" text-anchor="middle" font-size="13" fill="#475467">SupCon + trigger loss</text>
+
+    <rect x="888" y="118" width="150" height="106" rx="8" fill="#ffffff" stroke="#d0d5dd"/>
+    <rect x="888" y="118" width="150" height="10" rx="5" fill="#f04438"/>
+    <text x="963" y="154" text-anchor="middle" font-size="17" font-weight="700" fill="#101828">Evaluation</text>
+    <text x="963" y="181" text-anchor="middle" font-size="13" fill="#475467">source / target acc</text>
+    <text x="963" y="202" text-anchor="middle" font-size="13" fill="#475467">source / target ASR</text>
+  </g>
+
+  <g stroke="#344054" stroke-width="2.3" fill="none" marker-end="url(#arrow)">
+    <path d="M 199 171 L 246 171"/>
+    <path d="M 409 171 L 456 171"/>
+    <path d="M 619 171 L 666 171"/>
+    <path d="M 829 171 L 876 171"/>
+  </g>
+
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="289" y="270" width="580" height="54" rx="8" fill="#eef4ff" stroke="#b2ccff"/>
+    <text x="579" y="292" text-anchor="middle" font-size="14" font-weight="700" fill="#1849a9">Staged backdoor training</text>
+    <text x="579" y="312" text-anchor="middle" font-size="13" fill="#344054">clean pretrain -> trigger warmup -> joint finetune with environment template matching</text>
+
+    <path d="M 753 226 C 753 246 739 257 711 270" stroke="#667085" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <path d="M 579 270 C 580 246 602 234 648 224" stroke="#667085" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  </g>
+</svg>
